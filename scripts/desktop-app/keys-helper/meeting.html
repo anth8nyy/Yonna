@@ -1,0 +1,242 @@
+<!doctype html>
+<!--
+  Yonna's meeting window (meeting.swift draws the glass and the window; this
+  is what is in it). Choose Translate, Answer and/or Save — Save goes with
+  either, Translate and Answer not together — then Start.
+  Swift calls ui.offer / started / stopped / line / greek / question / answer /
+  saved / note / error / drop; this page posts {op} back.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --text: #ededeb; --muted: #8e8e93; --line: rgba(255,255,255,.08); --blue: #9db2ff; --ease: cubic-bezier(.2,.8,.2,1); }
+  html, body { margin: 0; height: 100%; background: rgba(10,10,11,.38); color: var(--text); overflow: hidden;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+    -webkit-user-select: none; cursor: default; }
+  #app { height: 100%; display: flex; flex-direction: column; padding: 38px 18px 14px; box-sizing: border-box; }
+  header { display: flex; align-items: baseline; gap: 8px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 300; }
+  #clock { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .private { margin: 4px 0 14px; font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .private::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #30d158; }
+  .chips { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .chip { padding: 9px 6px 8px; border: 0; border-radius: 10px; font: inherit; color: var(--muted); cursor: pointer;
+    background: rgba(255,255,255,.06); box-shadow: inset 0 0 0 .5px rgba(255,255,255,.1);
+    display: flex; flex-direction: column; align-items: center; gap: 2px; transition: background .2s, color .2s, opacity .2s; }
+  .chip b { font-weight: 500; font-size: 13px; color: var(--text); }
+  .chip span { font-size: 10.5px; }
+  .chip.on { background: rgba(157,178,255,.22); box-shadow: inset 0 0 0 1px rgba(157,178,255,.55); color: #dfe6ff; }
+  .chip:disabled { opacity: .35; cursor: default; }
+  .rule { margin: 6px 0 0; font-size: 11px; color: var(--muted); min-height: 15px; }
+  #go { margin-top: 10px; padding: 9px; border: 0; border-radius: 10px; font: 500 13px -apple-system, system-ui; cursor: pointer;
+    background: var(--blue); color: #0a0a0b; transition: background .2s, opacity .2s; }
+  #go:disabled { opacity: .4; cursor: default; }
+  #go.stop { background: rgba(255,90,90,.85); color: #fff; }
+  #feed { flex: 1; overflow-y: auto; margin-top: 14px; padding-top: 6px; border-top: .5px solid var(--line);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px); scrollbar-width: none; -webkit-user-select: text; }
+  #feed::-webkit-scrollbar { width: 0; }
+  #feed:empty::before { content: attr(data-empty); display: block; margin-top: 18px; color: var(--muted); font-size: 12px; text-align: center; }
+  .ln { padding: 7px 0; animation: in .3s var(--ease) both; }
+  .ln .who { font-size: 10.5px; color: var(--muted); letter-spacing: .02em; }
+  .ln.you .who { color: #8fd19e; }
+  .ln .t { font-size: 13.5px; }
+  .ln.partial .t { color: #b8b8bd; }
+  .ln .g { margin-top: 3px; font-size: 13.5px; color: #dfe6ff; }
+  /* Translating: the Greek only. A line shows once its Greek has come back. */
+  /* Translating: the Greek only, as one continuous paragraph. */
+  body.greek-only .ln { display: none; }
+  #flow { margin: 8px 0 4px; font-size: 15px; line-height: 1.6; color: var(--text); -webkit-user-select: text; }
+  #flow span { animation: in .3s var(--ease) both; }
+  body.answer-mode .ln { display: none; }
+  body.answer-mode #flow { color: #c9c9ce; }
+  #flow span.partial { color: var(--muted); }
+  .say { margin: 10px 0; padding: 12px 14px; border-radius: 14px; background: rgba(157,178,255,.13);
+    box-shadow: inset 0 0 0 .5px rgba(157,178,255,.4); animation: in .3s var(--ease) both; }
+  .say .k, .say .k2 { font-size: 10.5px; color: var(--blue); }
+  .say .k2 { margin-top: 8px; }
+  .say .sq { margin-top: 2px; color: #cfd6f5; font-size: 13px; }
+  .say .sa { margin-top: 2px; color: #fff; font-size: 15px; line-height: 1.5; -webkit-user-select: text; }
+  .say .sa.wait { color: var(--muted); }
+  .q { margin: 8px 0; padding: 10px 12px; border-radius: 12px; background: rgba(157,178,255,.12);
+    box-shadow: inset 0 0 0 .5px rgba(157,178,255,.35); animation: in .3s var(--ease) both; }
+  .q .k { font-size: 10.5px; color: var(--blue); }
+  .q .qq { margin-top: 2px; color: #cfd6f5; }
+  .q .a { margin-top: 6px; font-size: 14px; color: #fff; }
+  .q .a.wait { color: var(--muted); }
+  footer { margin-top: 10px; display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); min-height: 18px; }
+  footer #clear { margin-left: auto; }
+  footer #clear + #open { margin-left: 0; }
+  footer button { margin-left: auto; padding: 4px 10px; border: 0; border-radius: 7px; font: inherit; color: var(--text);
+    background: rgba(255,255,255,.12); cursor: pointer; }
+  footer button[hidden] { display: none; }
+  .err { color: #ffb4a8; }
+  @keyframes in { from { opacity: 0; transform: translateY(4px); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header><h1 id="title">Meeting</h1><span id="clock"></span></header>
+  <div class="private" id="private">Only on this Mac. Hears the meeting, never your microphone.</div>
+  <div class="chips">
+    <button class="chip" data-m="translate"><b>Translate</b><span>into Greek</span></button>
+    <button class="chip" data-m="answer"><b>Answer</b><span>suggest replies</span></button>
+    <button class="chip" data-m="save"><b>Save</b><span>Word file</span></button>
+  </div>
+  <div class="rule" id="rule"></div>
+  <button id="go" disabled>Start</button>
+  <div id="feed" data-empty="Pick what Yonna should do, then Start."></div>
+  <footer><span id="status"></span><button id="clear" title="Clear the conversation from the window (a saved file keeps it all)">Clear</button><button id="open" hidden>Open file</button></footer>
+</div>
+<script>
+  const $ = (id) => document.getElementById(id)
+  const post = (m) => window.webkit.messageHandlers.meeting.postMessage(m)
+  const modes = new Set()
+  let running = false, started = 0, clock = null, greekOnly = false, answerMode = false
+
+  function paint() {
+    document.querySelectorAll('.chip').forEach((c) => {
+      const m = c.dataset.m
+      c.classList.toggle('on', modes.has(m))
+      // Translate and Answer: one or the other, never both.
+      c.disabled = running || (m === 'translate' && modes.has('answer')) || (m === 'answer' && modes.has('translate'))
+    })
+    $('rule').textContent = modes.has('translate') || modes.has('answer') ? 'Save goes with either; Translate and Answer not together.' : ''
+    $('go').disabled = !running && modes.size === 0
+    $('go').textContent = running ? 'Stop' : 'Start'
+    $('go').classList.toggle('stop', running)
+  }
+  document.querySelectorAll('.chip').forEach((c) => c.addEventListener('click', () => {
+    const m = c.dataset.m
+    modes.has(m) ? modes.delete(m) : modes.add(m)
+    paint()
+  }))
+  $('go').addEventListener('click', () => post(running ? { op: 'stop' } : { op: 'start', modes: [...modes] }))
+  $('open').addEventListener('click', () => post({ op: 'open' }))
+  $('clear').addEventListener('click', () => {
+    feed.innerHTML = ''
+    post({ op: 'clear' })
+  })
+
+  const feed = $('feed')
+  const near = () => feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80
+  const keep = (was) => { if (was) feed.scrollTop = feed.scrollHeight }
+  const status = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : '' }
+
+  window.ui = {
+    offer({ app, running: r, private: p }) {
+      $('title').textContent = `Meeting · ${app}`
+      if (!p) $('private').textContent = 'This Mac cannot do speech privately, so Yonna will not listen.'
+      running = r; paint()
+    },
+    started({ modes: ms, greekOnly: g, answerMode: am }) {
+      greekOnly = !!g
+      answerMode = !!am
+      document.body.classList.toggle('greek-only', greekOnly)
+      document.body.classList.toggle('answer-mode', answerMode)
+      running = true; started = Date.now(); feed.innerHTML = ''; feed.dataset.empty = 'Listening…'
+      $('open').hidden = true; status('')
+      clearInterval(clock)
+      clock = setInterval(() => {
+        const s = Math.floor((Date.now() - started) / 1000)
+        $('clock').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+      }, 1000)
+      paint()
+    },
+    stopped({ reason, file }) {
+      running = false; clearInterval(clock); feed.dataset.empty = 'Pick what Yonna should do, then Start.'
+      status(reason || (file ? 'Saved.' : 'Stopped.'))
+      if (file) $('open').hidden = false
+      paint()
+    },
+    line({ id, who, text, final }) {
+      const was = near()
+      if (answerMode) {
+        // One flowing paragraph of what is being said, phrase after phrase.
+        let flow = document.getElementById('flow')
+        if (!flow) { flow = document.createElement('p'); flow.id = 'flow'; feed.append(flow) }
+        let span = document.getElementById('e-' + id)
+        if (!span) { span = document.createElement('span'); span.id = 'e-' + id; flow.append(span) }
+        span.textContent = text + ' '
+        span.classList.toggle('partial', !final)
+        keep(was)
+        return
+      }
+      let el = document.getElementById(id)
+      if (!el) {
+        el = document.createElement('div')
+        el.id = id
+        el.className = 'ln ' + (who === 'You' ? 'you' : 'them')
+        el.innerHTML = '<div class="who"></div><div class="t"></div><div class="g" hidden></div>'
+        el.querySelector('.who').textContent = who === 'You' ? 'You' : 'Them'
+        feed.append(el)
+      }
+      el.classList.toggle('partial', !final)
+      el.querySelector('.t').textContent = text
+      keep(was)
+    },
+    drop({ id }) { for (const p of ['', 'g-', 'e-']) document.getElementById(p + id)?.remove() },
+    greek({ id, text }) {
+      const was = near()
+      if (greekOnly) {
+        // One flowing paragraph of Greek, each phrase joined to the last.
+        let flow = document.getElementById('flow')
+        if (!flow) { flow = document.createElement('p'); flow.id = 'flow'; feed.append(flow) }
+        let span = document.getElementById('g-' + id)
+        if (!span) { span = document.createElement('span'); span.id = 'g-' + id; flow.append(span) }
+        span.textContent = text + ' '
+      } else {
+        const el = document.getElementById(id)
+        const g = el?.querySelector('.g')
+        if (g) { g.textContent = text; g.hidden = false; el.classList.add('has-greek') }
+      }
+      keep(was)
+    },
+    question({ id, text }) {
+      if (answerMode) {
+        // One card per question — or per run of questions asked back to back.
+        const was = near()
+        let card = document.getElementById('say-' + id)
+        if (!card) {
+          card = document.createElement('div')
+          card.className = 'say'
+          card.id = 'say-' + id
+          card.innerHTML = '<div class="k">They asked</div><div class="sq"></div><div class="k2">You could say</div><div class="sa wait">Thinking…</div>'
+          feed.append(card)
+          // What is said next starts a new paragraph under this card.
+          document.getElementById('flow')?.removeAttribute('id')
+        }
+        card.querySelector('.sq').textContent = text
+        keep(was)
+        return
+      }
+      const was = near()
+      const q = document.createElement('div')
+      q.className = 'q'; q.id = 'q-' + id
+      q.innerHTML = '<div class="k">They asked</div><div class="qq"></div><div class="a wait">Thinking of an answer…</div>'
+      q.querySelector('.qq').textContent = text
+      feed.append(q)
+      keep(was)
+    },
+    answer({ id, text }) {
+      if (answerMode) {
+        const was = near()
+        const a = document.getElementById('say-' + id)?.querySelector('.sa')
+        if (a && text) { a.textContent = text; a.classList.remove('wait') }
+        keep(was)
+        return
+      }
+      const was = near()
+      const a = document.getElementById('q-' + id)?.querySelector('.a')
+      if (a && text) { a.textContent = text; a.classList.remove('wait') }
+      keep(was)
+    },
+    saved({ file }) { status('Saved to ' + file.split('/').slice(-2).join('/')); $('open').hidden = false },
+    note({ text }) { status(text) },
+    error({ text }) { status(text, true) },
+  }
+  paint()
+  post({ op: 'ready' })
+</script>
+</body>
+</html>

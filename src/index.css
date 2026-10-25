@@ -1,0 +1,2284 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@300;400&display=swap');
+
+/* The "Yonna — Minimal Redesign" build spec. */
+:root {
+  --bg: #0a0a0b;
+  --panel: #111113;
+  --hairline: #1c1c1f;
+  --text: #ededeb;
+  --muted: #6b6b70;
+  --blue: #9db2ff;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  /* `--accent` is re-declared per phase and per panel; this one stays put
+     and is what anything neutral pins itself to. */
+  --interface: #bdbdbd;
+  --accent: var(--interface);
+  font-family: 'Inter', -apple-system, system-ui, sans-serif;
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* In the native Yonna window (window-app), the page sits on Mac glass: a
+   see-through background with a dark tint, so the desktop shows through
+   blurred, as on Atticus. */
+html.native { --bg: rgba(10, 10, 11, 0.45); }
+html.native,
+html.native body { background: transparent; }
+
+.scene {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+}
+
+/* Yonna's orb — see ui/Orb.tsx. Centred, a little above the middle so the
+   state line under it sits on the centre line. */
+.orb {
+  position: fixed;
+  left: 50%;
+  top: calc(50% - 24px);
+  z-index: 1;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* --------------------------------------------------------------------- HUD */
+
+.hud {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.hud-top {
+  position: absolute;
+  top: 22px;
+  left: 0;
+  right: 0;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Tracked +6, small, centred. */
+.brand-mark {
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.55em;
+  margin-right: -0.55em;
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.status {
+  position: absolute;
+  right: 24px;
+  top: 0;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The microphone: a dot. Green while it is on, red when muted. */
+.mic-dot {
+  position: relative;
+  pointer-events: auto;
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border-radius: 50%;
+  border: 0;
+  background: #4ade80;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.45);
+  cursor: pointer;
+  transition: background 240ms var(--ease), box-shadow 240ms var(--ease);
+}
+.mic-dot::after { content: ''; position: absolute; inset: -8px; }
+.mic-dot.is-muted { background: #f05252; box-shadow: 0 0 8px rgba(240, 82, 82, 0.45); }
+
+.brain-btn {
+  pointer-events: auto;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  transition: color 160ms;
+}
+.brain-btn:hover { color: var(--text); }
+
+/* Under the orb: the state, and a fainter hint. */
+.state {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--orb-bottom, 60vh) + 10px);
+  transform: translateX(-50%);
+  text-align: center;
+  white-space: nowrap;
+}
+.state-label { font-size: 14px; color: var(--text); }
+.state-hint { margin-top: 6px; min-height: 16px; font-size: 12px; color: var(--muted); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.75); }
+}
+
+/* Side rails */
+
+.rail {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  font-size: 10px;
+}
+.rail-left { left: 92px; }
+.rail-right { right: 92px; align-items: flex-end; }
+
+.rail-title {
+  font-size: 8px;
+  opacity: 0.4;
+  letter-spacing: 0.34em;
+  margin-bottom: 4px;
+}
+
+.rail-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.82;
+}
+.rail-item.dim { opacity: 0.3; }
+.rail-item.mono { font-family: 'JetBrains Mono', monospace; letter-spacing: 0.1em; }
+
+.tick {
+  width: 5px;
+  height: 5px;
+  background: var(--accent);
+  transform: rotate(45deg);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+.meter {
+  width: 3px;
+  height: 96px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  display: flex;
+  align-items: flex-end;
+  margin: 4px 0;
+}
+
+.meter-fill {
+  width: 100%;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+  transition: height 90ms linear;
+}
+
+/* Tool badge */
+
+/* The tool readout. This is the moment the interface proves it did something
+   real, so it's set as a headline under the reactor rather than a chip on top
+   of it — no box, no backdrop, just light. */
+.tool-badge {
+  position: absolute;
+  /* Pinned near the top, in its own band with the rest of the status chrome.
+     The centring (x: -50%) is a framer motion prop in Hud.tsx, not here —
+     framer writes `transform` inline on an animated element and would overwrite
+     anything declared in CSS. */
+  top: 74px;
+  left: 50%;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  white-space: nowrap;
+  padding: 7px 16px 7px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 9%, rgba(8, 8, 8, 0.55));
+  backdrop-filter: blur(5px);
+  box-shadow: 0 0 30px color-mix(in srgb, var(--accent) 22%, transparent);
+  /* Above the panels and the log so a long tool name reads cleanly, but it is a
+     thin chip that never enters the transcript's space to begin with. */
+  z-index: 6;
+}
+
+.tool-kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 8px;
+  letter-spacing: 0.36em;
+  text-indent: 0.36em;
+  opacity: 0.6;
+  padding-right: 12px;
+  border-right: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.tool-name {
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;
+  /* Bounded so a long name truncates rather than stretching the chip off-frame. */
+  max-width: min(52vw, 620px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #e6e6e6;
+  text-shadow: 0 0 24px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+@media (max-width: 1100px) {
+  .tool-name { font-size: 12px; letter-spacing: 0.18em; max-width: 60vw; }
+  .tool-badge { top: 60px; }
+}
+
+.spinner {
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Conversation log — the last question and its answer, at the bottom. */
+
+.log {
+  position: absolute;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  width: min(640px, 62vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.log-line {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.log-who {
+  flex: 0 0 44px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.log { opacity: 0.55; }
+.log-who { opacity: 0.6; }
+.log-user .log-text { color: var(--muted); }
+.log-yonna .log-text { color: var(--text); }
+
+/* Live partial transcript while listening */
+
+.caption {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  font-size: 13px;
+  color: var(--text);
+  max-width: 62vw;
+  text-align: center;
+}
+
+.error {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  color: #e58a8a;
+  font-size: 11px;
+  max-width: 70vw;
+  text-align: center;
+}
+
+.hud-bottom {
+  position: absolute;
+  bottom: 44px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9px;
+  opacity: 0.38;
+  letter-spacing: 0.2em;
+}
+
+kbd {
+  font-family: 'JetBrains Mono', monospace;
+  border: 1px solid currentColor;
+  padding: 1px 5px;
+  font-size: 9px;
+}
+
+/* ----------------------------------------------------------------- panels */
+
+/* Centring is done with flex rather than `transform: translate(-50%)`.
+   Framer Motion's layout projection cannot measure through a transformed
+   ancestor — it re-measures every frame and fights the CSS, which shows up as
+   a hard flicker on any panel that animates. */
+.panels {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+  pointer-events: none;
+}
+
+.panels-right {
+  top: 0;
+  bottom: 0;
+  right: 150px;
+  width: 320px;
+  align-items: flex-end;
+}
+
+/* Clear of the SYSTEMS rail, which sits at left:92px and runs ~150px wide. */
+.panels-left {
+  top: 0;
+  bottom: 0;
+  left: 272px;
+  width: 280px;
+  align-items: flex-start;
+}
+
+/* Under the reactor, for images and anything that needs the width. */
+.panels-wide {
+  left: 0;
+  right: 0;
+  bottom: 132px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.panels-wide > * { width: min(620px, 60vw); }
+
+/* Accent identity. The panel re-declares --accent, so every .hud-* class inside
+   picks up the new colour without the model touching a hex value.
+
+   `default` needs a rule of its own even though it just restates the interface
+   cyan. Without one it inherits the live --accent from `.hud` and re-tints
+   itself amber, then violet, then green as the phase moves underneath it —
+   while every explicitly accented panel holds still. A panel is a record of a
+   moment; it should stop changing colour once it has landed. */
+.panel-default { --accent: var(--interface); }
+.panel-amber  { --accent: #cfcfcf; }
+.panel-violet { --accent: #bdbdbd; }
+.panel-green  { --accent: #bdbdbd; }
+.panel-red    { --accent: #ff6b6b; }
+
+.panel {
+  position: relative;
+  width: 100%;
+  /* Bounded so a stray image or a run of markup can't balloon into a
+     screen-height rectangle. */
+  max-height: 46vh;
+  overflow: hidden;
+  padding: 14px 16px;
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--accent) 9%, transparent),
+    color-mix(in srgb, var(--accent) 3%, transparent)
+  );
+  backdrop-filter: blur(7px);
+  transform-origin: top center;
+  overflow: hidden;
+}
+
+/* Bracket corners rather than a full border — instrument markings, not boxes. */
+.pk {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--accent);
+  opacity: 0.85;
+}
+.pk-tl { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+.pk-tr { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+.pk-bl { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+.pk-br { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+
+/* The scan wipe — a thin bright band travelling down the card once as it
+   lands. An earlier version filled the whole panel and washed the content out;
+   the point is a scan line passing over, not a flash. */
+.p-wipe {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 34%;
+  transform-origin: top;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 12%, transparent) 70%,
+    color-mix(in srgb, var(--accent) 55%, transparent) 100%
+  );
+  pointer-events: none;
+}
+
+.p-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.p-title {
+  font-size: 8px;
+  letter-spacing: 0.3em;
+  opacity: 0.62;
+}
+
+/* The design system Yonna composes with. These class names live in three
+   places and all three have to agree: here, in ALLOWED_CLASSES in
+   src/ui/Panels.tsx — anything absent from that set is stripped before it
+   reaches the DOM — and in the `display` tool description in
+   bridge/panels.mjs, which is how the model learns they exist. */
+
+.p-body {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Applied when the model asks for `stagger` — items land in sequence.
+   Indexed rather than scripted, so it works on whatever markup it authored.
+
+   An item is a direct child of the body, unless that child is one of the list
+   containers — then the rows inside it are the items and the container itself
+   sits still. This used to match grandchildren only, which is right for
+   `.hud-rows > .hud-row` and wrong for every other shape the design system
+   produces: a `<p class="hud-note">` body animated its inner span and nothing
+   else, and a flat row animated each of its columns separately. */
+.p-stagger > *,
+.p-stagger > :is(.hud-rows, .hud-grid, .hud-gallery) > * {
+  animation: rowIn 0.34s both;
+  animation-delay: var(--stagger-d, 0.05s);
+}
+
+/* A list container is scenery; its rows do the arriving. */
+.p-stagger > :is(.hud-rows, .hud-grid, .hud-gallery) { animation: none; }
+
+/* Delays are set on everything inside and only read by the rule above, so one
+   ladder covers both shapes. Anything past the last step shares it rather than
+   landing instantly — with six declared, a seventh row appeared fully formed
+   before the first one had moved. */
+.p-stagger *:nth-child(1) { --stagger-d: 0.05s; }
+.p-stagger *:nth-child(2) { --stagger-d: 0.11s; }
+.p-stagger *:nth-child(3) { --stagger-d: 0.17s; }
+.p-stagger *:nth-child(4) { --stagger-d: 0.23s; }
+.p-stagger *:nth-child(5) { --stagger-d: 0.29s; }
+.p-stagger *:nth-child(6) { --stagger-d: 0.35s; }
+.p-stagger *:nth-child(7) { --stagger-d: 0.41s; }
+.p-stagger *:nth-child(8) { --stagger-d: 0.47s; }
+.p-stagger *:nth-child(9) { --stagger-d: 0.53s; }
+.p-stagger *:nth-child(10) { --stagger-d: 0.59s; }
+.p-stagger *:nth-child(n + 11) { --stagger-d: 0.65s; }
+
+@keyframes rowIn {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* rows -------------------------------------------------------------------- */
+
+.hud-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.hud-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.hud-idx {
+  flex: 0 0 auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  opacity: 0.45;
+  padding-top: 2px;
+}
+
+.hud-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hud-label {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: #e6e6e6;
+  /* Two lines then clip — a HUD row, not a paragraph. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.hud-sub {
+  font-size: 10.5px;
+  line-height: 1.35;
+  opacity: 0.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-tag {
+  flex: 0 0 auto;
+  font-size: 8px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.42;
+  padding-top: 3px;
+}
+
+/* media ------------------------------------------------------------------- */
+
+.hud-img {
+  display: block;
+  width: 100%;
+  max-height: 300px;
+  object-fit: cover;
+  /* Pull photographs slightly toward the interface palette so they don't
+     fight the surrounding cyan. */
+  filter: saturate(0.85) contrast(1.05);
+}
+
+.hud-caption {
+  display: block;
+  margin-top: 8px;
+  font-size: 10px;
+  opacity: 0.5;
+}
+
+/* Web media -----------------------------------------------------------------
+
+   Everything below shows something Yonna found rather than something he made:
+   image-search thumbnails, a clip, a YouTube result. It is loaded through the
+   bridge proxy (see rewriteMedia in src/ui/Panels.tsx), so as far as the page
+   is concerned it all comes from localhost.
+
+   Two constraints shape the lot of it. The panel is a fixed column with
+   `overflow: hidden`, so anything in here has to be width-driven and never
+   wider than its container — a stray intrinsic width on an image or an iframe
+   would be clipped rather than scrolled, and would take the layout with it. And
+   `.panels` is `pointer-events: none` so the HUD never eats a click, which
+   means anything the user is actually meant to operate has to opt back in. */
+
+.hud-gallery {
+  display: grid;
+  /* auto-fill rather than a fixed count: the same markup has to work in the
+     280px left column and the 620px wide slot under the reactor. */
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  /* A grid item's default `min-width: auto` is its content's intrinsic width,
+     which is how a 1200px-wide photograph pushes a track past 1fr and blows the
+     row out sideways. */
+  min-width: 0;
+}
+
+.hud-gallery > * {
+  min-width: 0;
+}
+
+.hud-thumb {
+  display: block;
+  width: 100%;
+  /* Fixed ratio so a gallery of mixed portrait and landscape results reads as a
+     grid of tiles rather than a ragged mosaic. */
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  /* Matches .hud-img — pulls photographs toward the interface palette so they
+     don't fight the surrounding cyan. */
+  filter: saturate(0.85) contrast(1.05);
+}
+
+/* A thumbnail leading a row is a tile beside the text, not the row's content —
+   without a basis of its own, `width: 100%` on a flex item makes it fight the
+   label for the whole row. */
+.hud-row > .hud-thumb {
+  flex: 0 0 56px;
+  width: 56px;
+  align-self: center;
+}
+
+.hud-video {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: 300px;
+  background: #000;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  /* Controls are the whole point of a player. */
+  pointer-events: auto;
+}
+
+/* A 16:9 box for an embed. Written for both shapes the model will produce: the
+   class on a wrapper around the iframe, and the class on the iframe itself. */
+.hud-embed {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  background: #000;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+/* The wrapper case. An iframe carrying the class itself is already the box —
+   this is a descendant selector, so it doesn't match one. */
+.hud-embed iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+
+/* Media and its caption as one unit, so the caption can't drift onto the next
+   item when several sit in a row. */
+.hud-figure {
+  display: flex;
+  flex-direction: column;
+  margin: 8px 0 0;
+  min-width: 0;
+}
+
+.hud-figure > .hud-caption {
+  margin-top: 6px;
+}
+
+.hud-figure > img,
+.hud-figure > video {
+  max-width: 100%;
+}
+
+/* figures ----------------------------------------------------------------- */
+
+.hud-metric {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 40px;
+  line-height: 1;
+  color: #e6e6e6;
+  text-shadow: 0 0 30px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+
+.hud-unit {
+  display: block;
+  margin-top: 6px;
+  font-size: 9px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  opacity: 0.5;
+}
+
+.hud-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  opacity: 0.8;
+  color: #e6e6e6;
+}
+
+.hud-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+}
+
+/* Progress bar — width comes from a --v custom property, the one inline style
+   allowed through the sanitiser. */
+.hud-bar {
+  position: relative;
+  height: 2px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  overflow: hidden;
+}
+.hud-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--v, 0) * 100%);
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+/* Shown instead of a blank rectangle when a panel arrives with nothing in it. */
+.p-empty {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  opacity: 0.35;
+}
+
+.hud-dim { opacity: 0.45; }
+.hud-hot {
+  color: var(--accent);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+@media (max-width: 1400px) {
+  .panels-right { right: 40px; width: 290px; }
+  /* Below this width there isn't room for the rail and a left panel side by
+     side, so the panel takes the space and the rail sits under it. */
+  .panels-left { left: 40px; width: 260px; top: 32%; }
+}
+
+/* ------------------------------------------------------------ suggestions */
+
+.suggest {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  white-space: nowrap;
+}
+
+.suggest-lead {
+  font-size: 8px;
+  letter-spacing: 0.34em;
+  opacity: 0.3;
+}
+
+.suggest-text {
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  text-transform: none;
+  opacity: 0.45;
+}
+
+/* --------------------------------------------------------------- ignition */
+
+.ignition {
+  position: fixed;
+  inset: 0;
+  z-index: 7;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(ellipse at center, #000 0%, #000 70%);
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  color: #bdbdbd;
+}
+
+.ignition-ring {
+  position: absolute;
+  width: 240px;
+  height: 240px;
+  border: 1px solid rgba(200, 200, 200, 0.28);
+  border-top-color: rgba(200, 200, 200, 0.9);
+  border-radius: 50%;
+}
+
+.ignition-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.ignition-word {
+  font-size: 15px;
+  letter-spacing: 0.52em;
+  text-indent: 0.52em; /* balance the trailing letter-space */
+  text-shadow: 0 0 30px rgba(200, 200, 200, 0.7);
+}
+
+.ignition-sub {
+  font-size: 9px;
+  letter-spacing: 0.28em;
+  opacity: 0.4;
+  text-transform: uppercase;
+}
+
+.ignition:hover .ignition-word {
+  text-shadow: 0 0 44px rgba(200, 200, 200, 1);
+}
+
+/* ------------------------------------------------------------------- boot */
+
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 6;
+  background: var(--bg);
+  color: var(--accent);
+  overflow: hidden;
+}
+
+/* -- beat 1: the status bar -------------------------------------------- */
+
+.boot-bar {
+  position: absolute;
+  top: 12%;
+  left: 0;
+  right: 0;
+  padding: 0 min(9vw, 140px);
+  transition: opacity 0.6s ease, filter 0.6s ease;
+}
+.boot-bar-dim { opacity: 0.28; filter: blur(0.6px); }
+
+.boot-bar-frame {
+  position: relative;
+  border-top: 1.5px solid var(--accent);
+  border-bottom: 1.5px solid var(--accent);
+  padding: 14px 26px 12px;
+  clip-path: polygon(3% 0, 97% 0, 100% 42%, 97% 100%, 3% 100%, 0 42%);
+  box-shadow:
+    inset 0 0 40px color-mix(in srgb, var(--accent) 12%, transparent),
+    0 0 30px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.boot-bar-title {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: clamp(18px, 3.4vw, 40px);
+  font-weight: 300;
+  letter-spacing: 0.14em;
+  color: #e6e6e6;
+  text-shadow: 0 0 26px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.boot-dots { opacity: 0.6; margin: 0 0.2em; }
+.boot-cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.05em;
+  margin-left: 0.15em;
+  background: var(--accent);
+  animation: bootBlink 0.7s steps(1) infinite;
+}
+@keyframes bootBlink { 50% { opacity: 0 } }
+
+.boot-seg { display: flex; gap: 3px; margin-top: 12px; }
+.boot-seg-cell {
+  flex: 1;
+  height: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+.boot-seg-cell[data-on='1'] {
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+.boot-log {
+  margin-top: 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  line-height: 1.9;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+.boot-log-line { animation: bootLogIn 0.25s ease both; }
+.boot-log-line::before { content: '\203a  '; opacity: 0.5; }
+@keyframes bootLogIn { from { opacity: 0; transform: translateX(-8px) } }
+
+/* -- beats 2-4: the centre stage --------------------------------------- */
+
+.boot-stage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.boot-rings,
+.boot-suit,
+.boot-reactor {
+  width: min(58vmin, 520px);
+  height: min(58vmin, 520px);
+  overflow: visible;
+}
+
+.boot-ring {
+  fill: none;
+  stroke: var(--accent);
+  opacity: 0.8;
+  transform-box: fill-box;
+  transform-origin: center;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 50%, transparent));
+}
+.boot-name {
+  fill: #e6e6e6;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 20px;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.boot-wire {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 55%, transparent));
+}
+.boot-wire-dim { opacity: 0.4; stroke-width: 1; }
+.boot-suit-fig { filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent) 40%, transparent)); }
+.boot-tag {
+  fill: var(--accent);
+  opacity: 0.55;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-anchor: middle;
+}
+
+.boot-r-seg {
+  stroke: color-mix(in srgb, var(--accent) 30%, transparent);
+  stroke-width: 8;
+}
+.boot-r-on { stroke: #e6e6e6; filter: drop-shadow(0 0 8px var(--accent)); }
+.boot-r-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  opacity: calc(0.3 + var(--glow) * 0.6);
+}
+.boot-r-ring-in { stroke-width: 1.5; opacity: calc(0.2 + var(--glow) * 0.5); }
+.boot-r-tri {
+  fill: color-mix(in srgb, var(--accent) calc(var(--glow) * 45%), transparent);
+  stroke: #e6e6e6;
+  stroke-width: 3;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 calc(var(--glow) * 26px) var(--accent));
+}
+.boot-r-tri-in {
+  fill: color-mix(in srgb, #e6e6e6 calc(var(--glow) * 60%), transparent);
+  stroke: none;
+}
+.boot-r-v {
+  fill: none;
+  stroke: #000;
+  stroke-width: 3.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  opacity: var(--glow);
+}
+
+@media (max-width: 900px) {
+  .rail-left { left: 30px; }
+  .rail-right { right: 30px; }
+  .log { width: 84vw; }
+}
+
+/* ---------------------------------------------------------------------------
+   Instrument layer
+
+   The graduated rings, gauges and reticles that make the reactor read as a
+   cockpit instrument rather than a glowing ball. Sits above the 3D scene
+   (z 1) and below the HUD chrome (z 4), so text and panels always win.
+
+   Everything animates with transform only, on its own compositor layer, and
+   nothing in here re-renders between phase changes.
+   --------------------------------------------------------------------------- */
+
+.instruments {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  /* The reactor sits slightly above centre, matching the 3D camera. */
+  transform: translateY(-2vh);
+}
+
+.instruments svg {
+  /* Tied to the smaller axis so the assembly stays circular and never crops. */
+  width: min(82vmin, 820px);
+  height: min(82vmin, 820px);
+  overflow: visible;
+}
+
+.instruments path,
+.instruments text {
+  transition: stroke 600ms ease, fill 600ms ease;
+}
+
+/* -- strokes -------------------------------------------------------------- */
+
+.ins-tick {
+  stroke: var(--ins);
+  stroke-width: 1;
+  opacity: 0.55;
+  vector-effect: non-scaling-stroke;
+}
+
+.ins-tick-major {
+  stroke: var(--ins);
+  stroke-width: 1.4;
+  opacity: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.ins-bar {
+  stroke: var(--ins);
+  stroke-width: 2.2;
+  opacity: 0.75;
+  vector-effect: non-scaling-stroke;
+}
+
+.ins-ring {
+  fill: none;
+  stroke: var(--ins);
+  stroke-width: 1;
+  opacity: 0.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.ins-ring-dashed {
+  stroke-dasharray: 46 12 4 12;
+  opacity: 0.8;
+}
+
+.ins-bracket {
+  fill: none;
+  stroke: var(--ins);
+  stroke-width: 1.6;
+  opacity: 0.85;
+  vector-effect: non-scaling-stroke;
+}
+
+.ins-spoke {
+  stroke: var(--ins);
+  stroke-width: 1;
+  opacity: 0.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.ins-hex {
+  fill: none;
+  stroke: var(--ins);
+  stroke-width: 1.2;
+  opacity: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.ins-hex-inner {
+  opacity: 0.45;
+}
+
+.ins-label {
+  fill: var(--ins);
+  opacity: 0.75;
+  font: 400 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.18em;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+/* -- rotation ------------------------------------------------------------- */
+
+@keyframes ins-cw  { to { transform: rotate(360deg) } }
+@keyframes ins-ccw { to { transform: rotate(-360deg) } }
+
+.ins-spin-cw,
+.ins-spin-cw-slow,
+.ins-spin-ccw,
+.ins-spin-ccw-fast {
+  transform-origin: 0 0;   /* the viewBox is centred on the origin */
+  transform-box: view-box;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  /* Phase changes retime the animation; easing the duration is not possible in
+     CSS, so the transition on stroke carries the change and the speed simply
+     steps. At these tempos the step is not readable as a jump. */
+  transition: none;
+}
+
+.ins-spin-cw        { animation-name: ins-cw;  animation-duration: var(--spin) }
+.ins-spin-cw-slow   { animation-name: ins-cw;  animation-duration: var(--spin-slow) }
+.ins-spin-ccw       { animation-name: ins-ccw; animation-duration: var(--spin) }
+.ins-spin-ccw-fast  { animation-name: ins-ccw; animation-duration: var(--spin-fast) }
+
+@media (prefers-reduced-motion: reduce) {
+  .ins-spin-cw,
+  .ins-spin-cw-slow,
+  .ins-spin-ccw,
+  .ins-spin-ccw-fast { animation: none }
+}
+
+/* ---------------------------------------------------------------------------
+   Decoding text
+
+   Yonna's half of the transcript resolves out of noise instead of simply
+   appearing. Two spans do the work: the ghost is the live scramble, the veil
+   is the text that has not been reached yet — present in the DOM, and so in
+   the accessibility tree and in the line wrapping, but not painted. Reserving
+   that space is what stops the paragraph reflowing under the reader as the
+   answer streams in.
+   --------------------------------------------------------------------------- */
+
+.decode-ghost {
+  /* Monospace on purpose: the noise should read as a readout rather than as a
+     word that has been mistyped. */
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.92em;
+  color: var(--accent);
+  opacity: 0.62;
+  text-shadow: 0 0 16px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.decode-veil {
+  opacity: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Blades — the tool-execution sweep
+
+   Thin shards raking across the frame at a tilt while a tool runs. Everything
+   here is transform and opacity so the whole sweep stays on the compositor and
+   never touches layout, which matters because it plays over a live 3D scene.
+
+   The band is inset from the top and bottom of the frame rather than filling
+   it: the header and the transcript both have to stay legible through this,
+   and a blade crossing a line of text is noise in the literal sense.
+   --------------------------------------------------------------------------- */
+
+.blades {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 14%;
+  /* Stops well short of the transcript. A four-line log at the bottom of a
+     short viewport reaches roughly 28% up the frame, and a blade crossing a
+     line of text is noise in the literal sense. */
+  bottom: 30%;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  /* Faded at both ends so the sweep reads as light passing through the middle
+     of the frame, and so it never arrives underneath the side rails or the
+     panel columns at full strength. */
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+}
+
+/* A second element for the vertical fade. Two masks on one box needs
+   mask-composite, which is still uneven across engines; nesting is boring and
+   works everywhere. */
+.blade-field {
+  position: absolute;
+  inset: 0;
+  -webkit-mask-image: linear-gradient(transparent, #000 20%, #000 80%, transparent);
+  mask-image: linear-gradient(transparent, #000 20%, #000 80%, transparent);
+}
+
+.blade {
+  position: absolute;
+  left: 0;
+  top: -14%;
+  height: 128%;
+  width: var(--blade-w);
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--accent) 70%, #fff) 46%,
+    var(--accent) 58%,
+    transparent
+  );
+  box-shadow: 0 0 22px color-mix(in srgb, var(--accent) 55%, transparent);
+  opacity: 0;
+  will-change: transform, opacity;
+  animation: bladeSweep var(--blade-t) cubic-bezier(0.45, 0, 0.25, 1) var(--blade-d) infinite;
+}
+
+@keyframes bladeSweep {
+  0%   { transform: translateX(-18vw) skewX(var(--blade-k)) scaleY(0.55); opacity: 0 }
+  14%  { opacity: var(--blade-o) }
+  70%  { opacity: var(--blade-o) }
+  100% { transform: translateX(116vw) skewX(var(--blade-k)) scaleY(1); opacity: 0 }
+}
+
+/* Six slivers, all different. Machinery engaging is not a metronome — the
+   widths, tilts and tempos are deliberately co-prime-ish so the pattern never
+   visibly repeats over the few seconds a tool call lasts. The wide, dim ones
+   are the glow the sharp ones travel in. */
+.blade-1 { --blade-w: 2px;  --blade-k: -20deg; --blade-t: 1.55s; --blade-d: 0s;    --blade-o: 0.85; --blade-x: 22vw }
+.blade-2 { --blade-w: 7px;  --blade-k: -20deg; --blade-t: 2.1s;  --blade-d: 0.18s; --blade-o: 0.26; --blade-x: 27vw }
+.blade-3 { --blade-w: 1px;  --blade-k: -13deg; --blade-t: 1.15s; --blade-d: 0.42s; --blade-o: 0.7;  --blade-x: 44vw }
+.blade-4 { --blade-w: 16px; --blade-k: -27deg; --blade-t: 2.6s;  --blade-d: 0.6s;  --blade-o: 0.14; --blade-x: 58vw }
+.blade-5 { --blade-w: 2px;  --blade-k: -27deg; --blade-t: 1.85s; --blade-d: 0.9s;  --blade-o: 0.6;  --blade-x: 63vw }
+.blade-6 { --blade-w: 3px;  --blade-k: -8deg;  --blade-t: 1.35s; --blade-d: 1.25s; --blade-o: 0.5;  --blade-x: 78vw }
+
+/* The name of the tool rides in with the sweep, then holds nearly still long
+   enough to be read, then leaves with it. Sits near the top of the band so it
+   never collides with the headline readout under the reactor. */
+.blade-carrier {
+  position: absolute;
+  left: 50%;
+  top: 4%;
+}
+
+.blade-tool {
+  display: block;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: #e6e6e6;
+  text-shadow:
+    0 0 18px var(--accent),
+    0 0 44px color-mix(in srgb, var(--accent) 55%, transparent);
+  will-change: transform, opacity;
+  animation: bladeCarry 3.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.blade-tool::before {
+  content: '⟩ ';
+  opacity: 0.5;
+}
+
+@keyframes bladeCarry {
+  0%   { transform: translateX(-150%) skewX(-18deg); opacity: 0 }
+  18%  { transform: translateX(-58%)  skewX(-4deg);  opacity: 0.92 }
+  72%  { transform: translateX(-42%)  skewX(4deg);   opacity: 0.92 }
+  100% { transform: translateX(45%)   skewX(18deg);  opacity: 0 }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* No sweep. The blades still say "something is running", they just say it as
+     a still frame — parked where each one would have crossed. */
+  .blade {
+    animation: none;
+    opacity: calc(var(--blade-o) * 0.55);
+    transform: translateX(var(--blade-x)) skewX(var(--blade-k));
+  }
+  .blade-tool {
+    animation: none;
+    transform: translateX(-50%);
+    opacity: 0.9;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   One-shot frame effects
+
+   Mounted only while playing (see Effects.tsx), so none of this costs anything
+   at rest. Everything is pointer-events: none — the ignition button and the
+   boot screen sit above the HUD entirely, so nothing here can trap a click.
+   --------------------------------------------------------------------------- */
+
+.fx {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.fx-play {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* flash ------------------------------------------------------------------- */
+
+.fx-flash {
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--accent) 55%, transparent),
+    transparent 72%
+  );
+  animation: fxFlash 480ms ease-out both;
+}
+
+@keyframes fxFlash {
+  0%   { opacity: 0 }
+  12%  { opacity: 1 }
+  100% { opacity: 0 }
+}
+
+/* scan -------------------------------------------------------------------- */
+
+.fx-scan::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 16vh;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--accent) 26%, transparent) 55%,
+    color-mix(in srgb, var(--accent) 80%, #fff) 92%,
+    transparent
+  );
+  animation: fxScan 900ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes fxScan {
+  from { transform: translateY(-20vh) }
+  to   { transform: translateY(120vh) }
+}
+
+/* pulse ------------------------------------------------------------------- */
+
+/* Centred on the reactor rather than on the viewport — the camera puts it
+   slightly above the middle, and a shockwave that misses its source by 2vh
+   reads as a bug rather than as an effect. */
+.fx-wave {
+  position: absolute;
+  top: calc(50% - 2vh);
+  left: 50%;
+  width: 40vmin;
+  height: 40vmin;
+  margin: -20vmin 0 0 -20vmin;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  box-shadow:
+    0 0 44px color-mix(in srgb, var(--accent) 60%, transparent),
+    inset 0 0 44px color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: fxWave 900ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+.fx-wave:nth-child(2) { animation-delay: 150ms }
+
+@keyframes fxWave {
+  from { transform: scale(0.22); opacity: 0.95 }
+  to   { transform: scale(3.4);  opacity: 0 }
+}
+
+/* glitch ------------------------------------------------------------------ */
+
+/* Slices displace what is *behind* them rather than painting over it —
+   backdrop-filter samples the live scene, so the tear happens to the reactor
+   itself. Stepped timing, because a glitch that eases is a wipe. */
+.fx-slice {
+  position: absolute;
+  left: -8%;
+  width: 116%;
+  opacity: 0;
+  -webkit-backdrop-filter: hue-rotate(90deg) saturate(1.9) contrast(1.08);
+  backdrop-filter: hue-rotate(90deg) saturate(1.9) contrast(1.08);
+  animation: fxTear 620ms steps(1, end) both;
+}
+
+.fx-glitch .fx-slice:nth-child(1) { top: 21%; height: 7%; animation-delay: 0ms }
+.fx-glitch .fx-slice:nth-child(2) { top: 45%; height: 4%; animation-delay: 90ms }
+.fx-glitch .fx-slice:nth-child(3) { top: 67%; height: 9%; animation-delay: 40ms }
+
+@keyframes fxTear {
+  0%, 100% { transform: translateX(0);      opacity: 0 }
+  10%      { transform: translateX(-3.5%);  opacity: 1 }
+  30%      { transform: translateX(2.6%);   opacity: 1 }
+  55%      { transform: translateX(-1.4%);  opacity: 1 }
+  80%      { transform: translateX(0.8%);   opacity: 1 }
+}
+
+/* The chromatic half of the tear: two full-frame casts pulling apart. */
+.fx-glitch::before,
+.fx-glitch::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  animation: fxChroma 620ms steps(2, end) both;
+}
+
+.fx-glitch::before { background: rgba(255, 40, 90, 0.13) }
+.fx-glitch::after  { background: rgba(200, 200, 200, 0.13); animation-direction: reverse }
+
+@keyframes fxChroma {
+  0%, 100% { transform: translateX(0);    opacity: 0 }
+  20%      { transform: translateX(-7px); opacity: 1 }
+  60%      { transform: translateX(6px);  opacity: 0.8 }
+}
+
+/* shake ------------------------------------------------------------------- */
+
+/* Applied to the HUD root by Effects.tsx for the duration, so the chrome takes
+   the hit as one body — the 3D scene is a separate layer and keeps still,
+   which is what sells it as the instruments being knocked rather than the
+   world moving. */
+.hud.fx-shaking {
+  animation: fxShake 520ms cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+@keyframes fxShake {
+  0%, 100% { transform: translate(0, 0) }
+  12%      { transform: translate(-11px, 5px) }
+  26%      { transform: translate(9px, -6px) }
+  42%      { transform: translate(-7px, -3px) }
+  58%      { transform: translate(6px, 4px) }
+  74%      { transform: translate(-3px, 2px) }
+  88%      { transform: translate(2px, -1px) }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Displacement is the part that hurts, so it goes; the effects still fire,
+     as a plain fade of the same colour in the same place. */
+  .hud.fx-shaking { animation: none }
+  .fx-slice,
+  .fx-wave,
+  .fx-scan::before,
+  .fx-glitch::before,
+  .fx-glitch::after {
+    animation-name: fxFade;
+    animation-timing-function: ease-out;
+  }
+}
+
+@keyframes fxFade {
+  0%   { opacity: 0 }
+  25%  { opacity: 0.7 }
+  100% { opacity: 0 }
+}
+
+/* ---------------------------------------------------------------------------
+   Diagnostics overlay (press D)
+
+   Deliberately plain and deliberately ugly: it is an instrument, not part of
+   the interface, and it should never be mistaken for one on camera.
+   --------------------------------------------------------------------------- */
+
+.diag {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 20;
+  width: min(24rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  padding: 0.75rem 0.9rem;
+  background: rgba(8, 8, 8, 0.94);
+  border: 1px solid var(--accent, #bdbdbd);
+  border-radius: 2px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.6;
+  color: #e6e6e6;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+
+.diag-head {
+  letter-spacing: 0.18em;
+  color: var(--accent, #bdbdbd);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.diag-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.78rem;
+}
+
+.diag-sec {
+  margin: 0.7rem 0 0.3rem;
+  letter-spacing: 0.16em;
+  color: #7a7a7a;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 0.45rem;
+}
+
+.diag-row {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr;
+  gap: 0.5rem;
+}
+
+.diag-k { color: #7a7a7a; }
+.diag-v { color: #e6e6e6; overflow-wrap: anywhere; }
+.diag-ok { color: #bdbdbd; }
+.diag-bad { color: #ff6b6b; }
+
+/* ------------------------------------------------------------------ blades */
+/*
+   The blade stack — the surface for things meant to be looked at rather than
+   glanced at. Panels live down the sides in a fixed narrow column; blades take
+   the middle of the frame, because the whole point of them is that an article
+   needs a readable measure and a picture needs room.
+
+   The stack is centred rather than railed to one side. That does cover the
+   reactor, and it should: when there is something on screen worth reading, the
+   reactor is no longer the subject.
+*/
+.blades-stack {
+  position: fixed;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  /* The container never eats clicks; only the cards inside it do, so the
+     reactor and the rails stay reachable around a small blade. */
+  pointer-events: none;
+}
+
+.bl {
+  position: absolute;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--accent) 11%, rgba(8, 8, 8, 0.94)),
+    color-mix(in srgb, var(--accent) 4%, rgba(8, 8, 8, 0.96))
+  );
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.62),
+    0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent) inset;
+  transform-origin: center center;
+}
+
+/* Only the front blade gets the accent glow; the ones behind read as paper. */
+.bl-front {
+  box-shadow:
+    0 26px 80px rgba(0, 0, 0, 0.7),
+    0 0 34px -10px color-mix(in srgb, var(--accent) 46%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent) inset;
+}
+
+/* Sizes are about how the content is meant to be consumed.
+   `tall` is a reading measure — roughly 60 characters at the body size in
+   page.mjs, which is the width prose is actually legible at. */
+.bl-compact { width: min(90vw, 440px);  height: min(58vh, 380px) }
+.bl-tall    { width: min(92vw, 560px);  height: min(82vh, 900px) }
+.bl-wide    { width: min(88vw, 1080px); height: min(72vh, 720px) }
+.bl-full    { width: 92vw;              height: 88vh }
+.bl-expanded { width: 94vw; height: 92vh }
+
+.bl-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px 9px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.bl-title {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: color-mix(in srgb, var(--accent) 92%, white);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bl-kind {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  opacity: 0.45;
+  margin-right: auto;
+}
+
+.bl-acts { display: flex; gap: 4px }
+
+.bl-btn {
+  pointer-events: auto;
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  background: transparent;
+  color: color-mix(in srgb, var(--accent) 80%, white);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+.bl-btn:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+}
+
+.bl-body {
+  flex: 1 1 auto;
+  min-height: 0;      /* or the iframe refuses to shrink inside the flex column */
+  overflow: auto;
+  position: relative;
+}
+
+/* A framed document fills the blade. It carries its own scrollbar, its own
+   stylesheet and its own CSP — see bridge/page.mjs. */
+.bl-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color-scheme: dark;
+}
+
+.bl-image,
+.bl-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* contain, not cover: this is the thing being looked at, and cropping the
+     subject out of a photograph to fill a rectangle is the wrong trade. */
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.bl-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  padding: 12px;
+}
+.bl-thumb {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.bl-markup { padding: 14px 16px; text-transform: none; letter-spacing: normal }
+
+.bl-note {
+  padding: 22px;
+  opacity: 0.6;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+}
+
+.bl-hint {
+  position: absolute;
+  bottom: 3.2vh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  opacity: 0.42;
+  pointer-events: none;
+}
+.bl-hint kbd {
+  font: inherit;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  padding: 1px 4px;
+}
+
+/* The body scrollbar inside a blade, matched to the reader view's own. */
+.bl-body::-webkit-scrollbar { width: 9px }
+.bl-body::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+  border-radius: 9px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bl { transition: none }
+}
+
+/* The slot carries the depth transform; the blade inside it carries the drag.
+   Both need a transform, and one element cannot serve two owners. */
+.bl-slot {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.bl-slot > .bl { pointer-events: auto }
+
+/* Dragged by the header, so the body stays selectable. */
+.bl-head { cursor: grab; user-select: none }
+.bl-head:active { cursor: grabbing }
+.bl-btn { cursor: pointer }
+
+.bl-grip {
+  position: absolute;
+  /* The reach is far bigger than the mark: 44px of invisible grab area on each
+     corner, so a hand cursor (or a quick mouse) does not have to hit a hairline. */
+  width: 44px;
+  height: 44px;
+  touch-action: none;
+  z-index: 3;
+}
+.bl-grip::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  opacity: 0.55;
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  border-style: solid;
+  border-width: 0;
+  transition: opacity 0.15s, width 0.15s, height 0.15s;
+}
+.bl-grip:hover::after { opacity: 1; width: 24px; height: 24px }
+.bl-grip-tl { top: 0; left: 0; cursor: nwse-resize }
+.bl-grip-tr { top: 0; right: 0; cursor: nesw-resize }
+.bl-grip-bl { bottom: 0; left: 0; cursor: nesw-resize }
+.bl-grip-br { bottom: 0; right: 0; cursor: nwse-resize }
+.bl-grip-tl::after { top: 3px; left: 3px; border-top-width: 2px; border-left-width: 2px }
+.bl-grip-tr::after { top: 3px; right: 3px; border-top-width: 2px; border-right-width: 2px }
+.bl-grip-bl::after { bottom: 3px; left: 3px; border-bottom-width: 2px; border-left-width: 2px }
+.bl-grip-br::after { bottom: 3px; right: 3px; border-bottom-width: 2px; border-right-width: 2px }
+/* The header buttons sit inside the top-right reach; they win. */
+.bl-acts { position: relative; z-index: 4 }
+
+/* "Stays" marker in the header; click it to let the blade go again. */
+.bl-stay.is-off { background: transparent; opacity: 0.55 }
+.bl-stay + .bl-stay { margin-left: 4px }
+/* A camera blade folded to its title bar: the body stays mounted (and the
+   camera on) but takes no room. */
+/* Folded both ways: only as wide as its title bar's own contents. */
+.bl.bl-collapsed { height: auto !important; width: max-content !important; max-width: 92vw }
+.bl.bl-collapsed .bl-body { height: 0; overflow: hidden; flex: 0 0 0 }
+.bl.bl-collapsed .bl-grip { display: none }
+.bl-stay {
+  margin-left: 8px;
+  padding: 1px 6px;
+  font: inherit;
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 2px;
+  cursor: pointer;
+  position: relative;
+  z-index: 4;
+}
+
+/* Right-click menu on a blade. */
+.bl-menu {
+  position: fixed;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  padding: 4px;
+  background: rgba(8, 8, 8, 0.97);
+  border: 1px solid color-mix(in srgb, var(--accent, #bdbdbd) 45%, transparent);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent, #bdbdbd) 25%, transparent);
+  font-family: inherit;
+}
+.bl-menu button {
+  padding: 7px 12px;
+  text-align: left;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent, #bdbdbd);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.bl-menu button:hover { background: color-mix(in srgb, var(--accent, #bdbdbd) 16%, transparent) }
+
+/* A resized blade is sized inline, so the presets must not fight it. */
+.bl[style*="width"] { max-width: none; max-height: none }
+
+/* ------------------------------------------------------------------- hands */
+/*
+   The hand overlay. Above everything, because it shows where a press will land
+   and must never be occluded by the thing it is about to press. pointer-events
+   is none throughout — this is a picture of a pointer, not a pointer; the real
+   events are synthesised and dispatched at whatever is underneath (hands.ts).
+*/
+.hands-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  pointer-events: none;
+}
+
+/* The camera indicator. Deliberately always visible while tracking runs: an
+   interface that can see the room has to say so without being asked. */
+.hands-live {
+  /* A small green camera under "Sonnet" at the top right while the camera is on. */
+  position: fixed;
+  top: 52px;
+  right: 24px;
+  z-index: 96;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 20px;
+  border-radius: 6px;
+  background: #30d158;
+  pointer-events: auto;
+}
+.hands-live svg { width: 16px; height: 11px; fill: #fff; }
+@keyframes handsPulse {
+  0%, 100% { opacity: 1 }
+  50%      { opacity: 0.35 }
+}
+
+/* The legend. Bottom-left, out of the way of both the reactor and the blade
+   stack, and gone once you have proved you know how it works. */
+.gguide {
+  position: fixed;
+  left: 22px;
+  bottom: 22px;
+  z-index: 96;
+  min-width: 210px;
+  padding: 11px 13px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, rgba(8, 8, 8, 0.86));
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.gguide-head {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-bottom: 8px;
+}
+.gguide-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 3px 0;
+  font-size: 11px;
+}
+.gguide-icon { width: 17px; font-size: 13px; line-height: 1; filter: saturate(0.2) }
+.gguide-name {
+  width: 44px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent) 95%, white);
+}
+.gguide-does { opacity: 0.68; font-size: 11px }
+.gguide-foot {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  opacity: 0.45;
+}
+.gguide-foot kbd {
+  font: inherit;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  padding: 0 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+}
+
+/* Spun in CSS, deliberately. Under framer this was an infinitely repeating
+   animation, and AnimatePresence will not unmount a subtree whose animations
+   never end — which left the whole ignition overlay on top of the interface
+   for the entire session, swallowing every click and every pinch. */
+.ignition-ring { animation: ignitionSpin 18s linear infinite }
+
+@keyframes ignitionSpin {
+  from { transform: rotate(0deg) }
+  to   { transform: rotate(360deg) }
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .ignition-ring { animation: none }
+}
+
+/* The live camera inside a blade. Mirrored, because a person expects their own
+   image to behave like a reflection — the frames sent to the model are not. */
+.bl-camera {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+  background: #000;
+}
+/* The desk camera looks at the desk, not at you: shown as it is, uncropped. */
+.bl-camera.is-desk { transform: none; object-fit: contain }
+
+
+/* Countdown blade — one big readout and a draining bar. */
+.bl-timer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  height: 100%;
+  min-height: 150px;
+  padding: 22px 18px;
+}
+.bl-timer-time {
+  font-size: 56px;
+  font-weight: 300;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  text-shadow: 0 0 24px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.bl-timer-bar {
+  width: 100%;
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.bl-timer-fill {
+  height: 100%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+  transition: width 0.25s linear;
+}
+.bl-timer.is-done .bl-timer-time {
+  color: #cfcfcf;
+  text-shadow: 0 0 28px rgba(207, 207, 207, 0.8);
+  animation: bl-timer-flash 0.9s ease-in-out infinite;
+}
+@keyframes bl-timer-flash {
+  0%, 100% { opacity: 1 }
+  50% { opacity: 0.35 }
+}
+.bl-timer.is-done { cursor: pointer }
+.bl-timer.is-acked .bl-timer-time { animation: none; opacity: 0.7 }
+.bl-timer-hint {
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+/* Live clock and stopwatch — share the countdown's readout. */
+.bl-clock .bl-timer-time { font-size: 50px }
+.bl-clock-date {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  opacity: 0.7;
+  text-align: center;
+}
+.bl-stopwatch-tenths { font-size: 0.5em; opacity: 0.7 }
+
+/* The typing line (T) — one more line of the conversation, right under it:
+   same column, same "YOU" label, the text visible as it is typed. */
+.typeline {
+  position: fixed;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%);
+  width: min(760px, 68vw);
+  z-index: 30;
+  pointer-events: auto;
+}
+.typeline-field {
+  position: relative;
+  flex: 1;
+  min-height: 22px;
+}
+/* The visible text, and a small white cursor drawn after it. */
+.typeline-mirror {
+  display: block;
+  font-size: 14px;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+  color: #e6e6e6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+}
+.typeline-caret {
+  display: inline-block;
+  width: 1.5px;
+  height: 0.85em;
+  margin-left: 1px;
+  vertical-align: -0.08em;
+  background: #fff;
+  animation: typeline-blink 1.05s steps(1) infinite;
+}
+@keyframes typeline-blink {
+  0%, 55% { opacity: 1 }
+  56%, 100% { opacity: 0 }
+}
+/* The real input: on top, catching keys, but itself invisible — no line, no
+   native caret, no text of its own. */
+.typeline-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  padding: 0;
+  font: inherit;
+  font-size: 14px;
+  color: transparent;
+  caret-color: transparent;
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+
+/* Keys, in the right rail under the signal meter. */
+.rail-keys-title { margin-top: 22px }
+.rail-keys {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+.rail-keys kbd { margin-right: 6px }
+
+/* Today — bottom-left link that slides open the day's calendar. */
+.today-btn,
+.keys-btn {
+  position: fixed;
+  bottom: 22px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: color 160ms;
+}
+.today-btn { left: 24px; }
+.today-btn:hover,
+.today-btn.is-open,
+.keys-btn:hover,
+.keys-btn.is-open { color: var(--text); }
+.today-chev { display: inline-block; transition: transform 240ms var(--ease); }
+.today-btn.is-open .today-chev { transform: rotate(-90deg); }
+.today-count { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+
+.agenda {
+  position: fixed;
+  left: 16px;
+  bottom: 52px;
+  z-index: 5;
+  width: min(300px, calc(100vw - 32px));
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 240ms var(--ease), transform 240ms var(--ease);
+}
+.agenda.is-open { opacity: 1; transform: none; pointer-events: auto; }
+.agenda-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 18px 10px;
+}
+.agenda-title-big { font-size: 28px; font-weight: 300; letter-spacing: -0.01em; }
+.agenda-date { font-size: 12px; color: var(--muted); }
+.agenda-body { overflow-y: auto; padding: 4px 0 12px; }
+.agenda-row {
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+  padding: 8px 18px;
+  font-size: 13px;
+  border-top: 1px solid var(--hairline);
+}
+.agenda-time { flex: 0 0 48px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); }
+.agenda-title { display: flex; flex-direction: column; gap: 2px; line-height: 1.4 }
+.agenda-sub { font-size: 12px; color: var(--muted) }
+.agenda-row.is-past { opacity: 0.4 }
+.agenda-row.is-next .agenda-time { color: var(--blue) }
+.agenda-empty { padding: 8px 18px; font-size: 13px; color: var(--muted) }
+
+/* The camera's own feed, in the page so Chrome keeps it current (see
+   camera.ts), but invisible and out of the way. */
+.camera-source {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Shortcuts — bottom right, and the panel it opens. */
+.keys-btn { right: 24px; }
+.keys-btn kbd,
+.keys-keys kbd {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: inherit;
+  padding: 1px 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.keys-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 52px;
+  z-index: 40;
+  width: min(440px, calc(100vw - 32px));
+  padding: 16px 18px 10px;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  pointer-events: auto;
+  animation: keys-in 240ms var(--ease);
+}
+@keyframes keys-in { from { opacity: 0; transform: translateY(12px) } }
+.keys-title { margin-bottom: 10px; font-size: 28px; font-weight: 300; color: var(--text); }
+.keys-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0;
+  border-top: 1px solid var(--hairline);
+  font-size: 13px;
+  color: var(--text);
+}
+.keys-keys { flex: 0 0 150px; display: flex; gap: 4px; flex-wrap: wrap }
+.keys-keys kbd { white-space: nowrap; color: var(--text); }
+.keys-does { color: var(--muted) }
+
+/* First launch: what Yonna needs, with Allow buttons (Welcome.tsx). */
+.welcome-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+.welcome {
+  width: min(480px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 26px 24px 18px;
+  border-radius: 18px;
+  background: rgba(22, 22, 24, 0.92);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.14), 0 24px 70px rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(30px);
+  backdrop-filter: blur(30px);
+  color: var(--text);
+}
+.welcome-title { font-size: 26px; font-weight: 300; }
+.welcome-sub { margin: 6px 0 16px; font-size: 13px; color: var(--muted); }
+.welcome-list { list-style: none; margin: 0; padding: 0; }
+.welcome-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 0;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+.welcome-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #636366; }
+.welcome-dot.is-allowed { background: #30d158; }
+.welcome-dot.is-denied { background: #ff9f0a; }
+.welcome-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.welcome-text b { font-size: 13.5px; font-weight: 500; }
+.welcome-text em { font-style: normal; font-weight: 400; font-size: 11px; color: var(--muted); margin-left: 4px; }
+.welcome-text span { font-size: 12px; color: var(--muted); }
+.welcome-list button,
+.welcome-go {
+  flex: none;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.welcome-list button:hover { background: rgba(255, 255, 255, 0.2); }
+.welcome-ok { flex: none; font-size: 12px; color: #30d158; padding-right: 4px; }
+.welcome-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  color: var(--muted);
+}
+.welcome-go { background: var(--blue); color: #0a0a0b; }
+.welcome-go:hover { background: #b3c4ff; }
