@@ -1,7 +1,7 @@
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 
@@ -54,7 +54,46 @@ function installedApps() {
       }
     }
   }
+  // Apps kept in the Dock from anywhere else (Spotify in Downloads, say).
+  for (const path of dockApps()) add(dirname(path), basename(path))
+  // Websites added to the Dock from Safari, by their real names: a YouTube web
+  // app may sit in a file called anything, but knows it is "YouTube".
+  for (const [name, path] of [...apps]) {
+    if (!path.startsWith(join(homedir(), 'Applications'))) continue
+    for (const alias of webAppNames(path)) if (!apps.has(alias)) apps.set(alias, path)
+    if (name.startsWith('.')) apps.delete(name)
+  }
   return apps
+}
+
+/** The Dock's apps, as paths. */
+function dockApps() {
+  try {
+    const out = execFileSync('/usr/bin/defaults', ['read', 'com.apple.dock', 'persistent-apps'], { encoding: 'utf8', timeout: 3000 })
+    return [...out.matchAll(/"_CFURLString" = "file:\/\/([^"]+?)\/?"/g)].map((m) => decodeURIComponent(m[1])).filter((p) => p.endsWith('.app'))
+  } catch {
+    return []
+  }
+}
+
+/** A Safari web app's names: its own ("YouTube") and its site's ("youtube"). */
+const webNames = new Map()
+function webAppNames(path) {
+  if (webNames.has(path)) return webNames.get(path)
+  let names = []
+  try {
+    const info = JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(path, 'Contents/Info.plist')], { encoding: 'utf8', timeout: 3000 }))
+    if (String(info.CFBundleIdentifier ?? '').startsWith('com.apple.Safari.WebApp')) {
+      const m = info.Manifest ?? {}
+      let site = ''
+      try { site = new URL(m.start_url ?? m.scope ?? '').hostname.replace(/^(?:www|m|mail)\./, '').split('.')[0] } catch {}
+      names = [m.short_name, m.name, site].filter((n) => n && !String(n).startsWith('.')).map(String)
+    }
+  } catch {
+    /* not readable: its file name only */
+  }
+  webNames.set(path, names)
+  return names
 }
 
 const squash = (s) => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '')
@@ -180,13 +219,35 @@ function nearest(want, names, n = 5) {
  */
 const NEVER_CLOSE = new Set(['com.apple.finder'])
 
-/** Process ids belonging to Yonna's own window. */
+/** Process ids belonging to Yonna's own window: the native glass window
+ *  (YonnaWindow), or the Chrome window it replaced. Never closed by "close
+ *  all my apps" — that would end the conversation mid-sentence. */
 function yonnaPids() {
-  return new Promise((resolve) => {
-    execFile('/usr/bin/pgrep', ['-f', 'Yonna/chrome-profile'], (err, out) =>
-      resolve(new Set(String(out ?? '').split(/\s+/).filter(Boolean).map(Number))),
-    )
-  })
+  const find = (args) =>
+    new Promise((resolve) => {
+      execFile('/usr/bin/pgrep', args, (err, out) =>
+        resolve(String(out ?? '').split(/\s+/).filter(Boolean).map(Number)),
+      )
+    })
+  return Promise.all([find(['-x', 'YonnaWindow']), find(['-f', 'Yonna/chrome-profile'])]).then(
+    ([a, b]) => new Set([...a, ...b]),
+  )
+}
+
+/** The apps open right now, by name — not Yonna, not Finder. */
+/** An app's name as people say it: a Safari web app kept under a hidden file
+ *  name (".kjl§") is called by its own name ("YouTube"). */
+function sayName(name) {
+  if (!name?.startsWith('.')) return name
+  for (const [alias, path] of installedApps()) if (!alias.startsWith('.') && path.endsWith(`/${name}.app`) && /[A-Z]/.test(alias)) return alias
+  return name.slice(1)
+}
+
+export async function openApps() {
+  const names = [...new Set((await closeAllTargets()).map((a) => sayName(a.name)).filter(Boolean))]
+  if (!names.length) return 'Nothing else is open.'
+  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0]
+  return `${names.length === 1 ? 'Just' : `${names.length} apps:`} ${list}.`
 }
 
 /**
@@ -309,12 +370,19 @@ export function appsServer() {
         async ({ name }) => ok(await closeNamed(name)),
       ),
       tool(
+        'list_open_apps',
+        'The applications open right now (not Yonna or Finder). Use it when they ask what is open, ' +
+          'or before closing several apps to know their exact names.',
+        {},
+        async () => ok(await openApps()),
+      ),
+      tool(
         'close_all_apps',
         'Quit every open application except Yonna herself and Finder — ' +
-          '"close all the apps", "close everything". Each app quits ' +
+          '"close all the apps", "close everything", "close everything except Spotify". Each app quits ' +
           'as with ⌘Q, so unsaved work still prompts to save.',
-        {},
-        async () => ok(await closeAll()),
+        { except: z.array(z.string()).optional().describe('Apps to leave open.') },
+        async ({ except }) => ok(await closeAll(except ?? [])),
       ),
       tool(
         'list_apps',
@@ -355,29 +423,59 @@ export async function openNamed(name) {
   const exact = matches.find((m) => squash(m) === squash(name))
   const pick = exact ?? (matches.length === 1 || matches[0].length < matches[1].length ? matches[0] : null)
   if (!pick) return `Several applications match "${name}": ${matches.slice(0, 6).join(', ')}.`
+  // Already running: brought to the front, and said so.
+  const running = (await runningApps()).some((a) => squash(sayName(a.name)) === squash(pick))
   const err = await launch(apps.get(pick))
-  return err ? `${pick} could not be opened: ${err}` : `${pick} is open.`
+  return err ? `${pick} could not be opened: ${err}` : running ? `${pick} is already open.` : `${pick} is open.`
 }
 
 /** Quit one running app by its spoken name. */
+/**
+ * A misheard name ("clothing" for Claude) that starts like exactly one open
+ * app: that app — few apps are open, so the first letters are usually enough.
+ * Not for things that are plainly not apps ("close the door").
+ */
+const NOT_APPS = new Set(['door', 'window', 'windows', 'tab', 'tabs', 'lid', 'curtains', 'blinds', 'eyes', 'book', 'box', 'gate'])
+function startsLike(want, open) {
+  if (want.length < 4 || NOT_APPS.has(want)) return undefined
+  const same = open.filter((a) => squash(a.name).slice(0, 2) === want.slice(0, 2))
+  return same.length === 1 ? same[0] : undefined
+}
+
 export async function closeNamed(name) {
   const mine = await yonnaPids()
-  const open = (await runningApps()).filter((a) => !mine.has(a.pid))
+  // Each open app by the name it's called by ("YouTube", not ".kjl§").
+  const open = (await runningApps()).filter((a) => !mine.has(a.pid)).map((a) => ({ ...a, name: sayName(a.name) }))
   const want = squash(name.replace(/\.app$/i, ''))
   const guess = soundsLike(want, open.map((a) => a.name))
   const hit =
     open.find((a) => squash(a.name) === want) ??
     open.find((a) => squash(a.name).startsWith(want)) ??
     open.find((a) => squash(a.name).includes(want)) ??
-    (guess ? open.find((a) => a.name === guess.name) : undefined)
-  if (!hit) return `${name} is not running.`
+    (guess ? open.find((a) => a.name === guess.name) : undefined) ??
+    startsLike(want, open)
+  if (!hit) {
+    // An installed app that simply isn't open: say so plainly.
+    const installed = findApp(name, installedApps()).matches[0]
+    return installed && !findApp(name, installedApps()).guessed ? `${installed} is already closed.` : `${name} is not running.`
+  }
   if (NEVER_CLOSE.has(hit.id)) return `${hit.name} is left open; it is not closed from here.`
   return describe(await quitApps([hit]))
 }
 
 /** Quit everything but Yonna and Finder. */
-export async function closeAll() {
-  const targets = await closeAllTargets()
-  if (!targets.length) return 'No other applications are open.'
-  return describe(await quitApps(targets))
+/** Split "Spotify, Safari and Notes" into names. */
+export const nameList = (s) =>
+  String(s ?? '').split(/\s*(?:,|\band\b|&|\bplus\b)\s*/i).map((x) => x.replace(/^(?:the|my)\s+/i, '').trim()).filter(Boolean)
+
+/** Every open app quits — except any named in `except` ("Spotify", "chrome"). */
+export async function closeAll(except = []) {
+  const keep = except.map(squash).filter(Boolean)
+  const kept = (a) => keep.some((k) => squash(a.name).includes(k) || (k.length > 3 && k.includes(squash(a.name))))
+  const all = await closeAllTargets()
+  const targets = all.filter((a) => !kept(a))
+  const left = [...new Set(all.filter(kept).map((a) => a.name))]
+  if (!targets.length) return left.length ? `Only ${left.join(' and ')} ${left.length > 1 ? 'are' : 'is'} open — left as asked.` : 'No other applications are open.'
+  const out = describe(await quitApps(targets))
+  return left.length ? `${out} Kept ${left.join(' and ')} open.` : out
 }

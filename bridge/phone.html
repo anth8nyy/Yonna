@@ -1,0 +1,440 @@
+<!doctype html>
+<!--
+  Yonna on the iPhone (served by phone.mjs). Tap the orb and talk: what was
+  said goes to the Mac, which hears it, asks Yonna, and sends the answer back
+  to be spoken here. After she answers she listens a few seconds more for a
+  follow-up, so a conversation needs no more taps; tapping while she speaks
+  stops her and listens. __KEY__ is filled in with this phone's key.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Yonna">
+<meta name="theme-color" content="#0a0a0b">
+<link rel="manifest" href="/manifest.webmanifest?k=__KEY__">
+<link rel="apple-touch-icon" href="/icon.png">
+<title>Yonna</title>
+<style>
+  :root { --bg: #0a0a0b; --text: #ededeb; --muted: #6b6b70; --line: #1c1c1f; --blue: #9db2ff; --ease: cubic-bezier(.2, .8, .2, 1); }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+    font: 17px -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  /* A faint light behind the orb that follows her state. */
+  body::before { content: ''; position: fixed; inset: 0; pointer-events: none; opacity: var(--glow, .35);
+    background: radial-gradient(60vmax 45vmax at 50% 34%, rgba(157, 178, 255, .07), transparent 70%);
+    transition: opacity .8s var(--ease); }
+  main { position: relative; height: 100%; display: flex; flex-direction: column; align-items: center;
+    padding: calc(env(safe-area-inset-top) + 18px) 24px calc(env(safe-area-inset-bottom) + 20px); box-sizing: border-box; }
+  .top { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; }
+  .brand { font-size: 12px; letter-spacing: .55em; margin-right: -.55em; color: var(--muted); }
+  /* Whether the Mac answers: a quiet dot, red only when it doesn't. */
+  #link { position: absolute; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: #3a3a3f;
+    transition: background .6s var(--ease), box-shadow .6s var(--ease); }
+  #link.on { background: #5fd38a; box-shadow: 0 0 8px rgba(95, 211, 138, .45); }
+  #link.off { background: #ff6b6b; box-shadow: 0 0 8px rgba(255, 107, 107, .45); }
+  #orb { width: 290px; height: 290px; margin-top: 12vh; touch-action: none; }
+  .hint { margin-top: 6px; height: 18px; font-size: 13px; color: var(--muted); letter-spacing: .01em;
+    transition: opacity .35s var(--ease); }
+  /* All the words in one soft grey, about 3 cm (≈180 px on an iPhone) below the orb. */
+  #words { margin-top: 160px; display: flex; flex-direction: column; align-items: center; gap: 8px;
+    text-align: center; color: var(--muted); min-height: 60px; }
+  #say { font-size: 16px; font-weight: 300; line-height: 1.45; max-width: 320px; }
+  #heard { font-size: 14px; max-width: 320px; }
+  .fade { transition: opacity .45s var(--ease), transform .45s var(--ease); }
+  .fade.out { opacity: 0; transform: translateY(4px); }
+  /* A call Yonna found: the iPhone asks to confirm it, this is the tap. */
+  #call { margin-top: 18px; padding: 12px 22px; border-radius: 22px; border: 1px solid var(--line); color: var(--blue);
+    text-decoration: none; font-size: 16px; }
+  #call[hidden] { display: none; }
+  /* The PC's password, only when its sign-in screen is waiting. */
+  #pw { margin-top: 18px; display: flex; gap: 8px; width: 100%; max-width: 320px; }
+  #pw[hidden] { display: none; }
+  #pw input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: #111113; color: var(--text); font: 16px -apple-system, system-ui, sans-serif; -webkit-user-select: text; user-select: text; }
+  #pw button { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); background: none; color: var(--blue);
+    font: 15px -apple-system, system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<main>
+  <div class="top"><div class="brand">YONNA</div><div id="link" aria-label="Connection to your Mac"></div></div>
+  <canvas id="orb" aria-label="Tap to talk to Yonna"></canvas>
+  <div class="hint" id="hint">Tap to talk</div>
+  <div id="words">
+    <div id="say" class="fade"></div>
+    <div id="heard" class="fade"></div>
+  </div>
+  <a id="call" hidden></a>
+  <form id="pw" hidden>
+    <input id="pwfield" type="password" autocomplete="current-password" placeholder="Your PC's password">
+    <button>Sign in</button>
+  </form>
+</main>
+<script>
+  const KEY = decodeURIComponent('__KEY__')
+  const SESSION = '__SESSION__' // only used when the Face ID lock is on
+  const $ = (id) => document.getElementById(id)
+  // idle · waiting (microphone starting) · listening · thinking · speaking
+  let state = 'idle'
+  let level = 0 // the microphone's loudness now, 0–1
+
+  function setState(s, hint) {
+    state = s
+    document.body.style.setProperty('--glow', { idle: '.35', waiting: '.6', listening: '1', thinking: '.75', speaking: '.85' }[s])
+    if (hint !== undefined) setHint(hint)
+  }
+  function setHint(text) {
+    const h = $('hint')
+    if (h.textContent === text) return
+    h.style.opacity = 0
+    setTimeout(() => { h.textContent = text; h.style.opacity = 1 }, 160)
+  }
+  /** Words fade out, change, and fade back in. */
+  function show(el, text) {
+    if (el.textContent === text) return
+    el.classList.add('out')
+    setTimeout(() => { el.textContent = text; el.classList.remove('out') }, 220)
+  }
+
+  /* ------------------------------------------------------------- the orb */
+  // A ring of 72 lights, as on the Mac. Every quality of it — size, colour,
+  // brightness, how much it moves — eases towards what the state wants, so
+  // one state flows into the next instead of jumping.
+  const cv = $('orb'), g = cv.getContext('2d')
+  const dpr = devicePixelRatio || 1
+  const SIZE = 290
+  cv.width = cv.height = SIZE * dpr
+  const look = { grow: 1, blue: 0, light: 0.45, dot: 1.8, move: 0.012, sweep: 0, pulse: 0, voice: 0 }
+  const want = {
+    idle: { grow: 1, blue: 0, light: 0.45, dot: 1.8, move: 0.012, sweep: 0, pulse: 0 },
+    waiting: { grow: 0.96, blue: 0.5, light: 0.6, dot: 1.9, move: 0.008, sweep: 0, pulse: 0 },
+    listening: { grow: 1.08, blue: 1, light: 0.9, dot: 2.4, move: 0.02, sweep: 0, pulse: 0 },
+    thinking: { grow: 1, blue: 0.15, light: 0.3, dot: 2, move: 0.006, sweep: 1, pulse: 0 },
+    speaking: { grow: 1.03, blue: 0, light: 0.85, dot: 2.1, move: 0.01, sweep: 0, pulse: 1 },
+  }
+  let last = performance.now()
+  ;(function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000)
+    last = now
+    const k = 1 - Math.exp(-dt * 7) // how far to ease this frame
+    const w = want[state]
+    for (const key in w) look[key] += (w[key] - look[key]) * k
+    look.voice += ((state === 'listening' ? level : 0) - look.voice) * (1 - Math.exp(-dt * 14))
+    const t = now / 1000, S = SIZE * dpr, c = S / 2
+    g.clearRect(0, 0, S, S)
+    const breath = 1 + 0.03 * Math.sin(t * 2 * Math.PI / 4)
+    const pulse = 1 + look.pulse * 0.025 * Math.sin(t * 9) * (0.6 + 0.4 * Math.sin(t * 2.3))
+    const head = (t * 2.4) % (2 * Math.PI)
+    const n = 72
+    const r0 = 157 + (255 - 157) * (1 - look.blue), g0 = 178 + (255 - 178) * (1 - look.blue)
+    for (let i = 0; i < n; i++) {
+      const a = i / n * 2 * Math.PI
+      const move = (look.move + 0.12 * look.voice) * Math.sin(t * (1.5 + 5.5 * look.blue) + i * (0.4 + 0.5 * look.blue))
+      const r = S * 0.36 * breath * look.grow * pulse * (1 + move)
+      let d = Math.abs(a - head); if (d > Math.PI) d = 2 * Math.PI - d
+      const light = Math.min(1, look.light + look.sweep * 0.7 * Math.max(0, 1 - d / 1.4))
+      g.fillStyle = `rgba(${r0 | 0},${g0 | 0},255,${light})`
+      g.beginPath(); g.arc(c + Math.cos(a) * r, c + Math.sin(a) * r, look.dot * dpr, 0, 2 * Math.PI); g.fill()
+    }
+    requestAnimationFrame(frame)
+  })(performance.now())
+
+  /* ----------------------------------------------------------- her voice */
+  // The Mac sends her answer as audio in its own voice. An iPhone lets a page
+  // make sound only from a player a touch has started, so every touch plays a
+  // moment of silence through it; the answer then plays through the same
+  // player. "playback" plays it even with the phone on silent.
+  let actx = null
+  const player = new Audio()
+  player.playsInline = true
+  function unlock() {
+    try {
+      player.src = '/silence.m4a'
+      player.play().catch(() => {})
+    } catch {}
+    try {
+      // Not while the microphone is on: "playback" would switch it off.
+      if (navigator.audioSession && !stream) navigator.audioSession.type = 'playback'
+      actx ??= new (window.AudioContext || window.webkitAudioContext)()
+      if (actx.state !== 'running') actx.resume()
+      const b = actx.createBuffer(1, 1, 22050), src = actx.createBufferSource()
+      src.buffer = b; src.connect(actx.destination); src.start(0)
+    } catch {}
+  }
+  let playing = null
+  function hush() {
+    try { playing?.stop() } catch {}
+    try { player.pause() } catch {}
+    try { speechSynthesis.cancel() } catch {}
+  }
+  async function speak(audio, text) {
+    if (navigator.audioSession) navigator.audioSession.type = 'playback'
+    hush()
+    if (!audio) return fallback(text)
+    try {
+      player.src = audio
+      await player.play()
+      return
+    } catch {}
+    // The sound engine as a second way, then the phone's own voice.
+    try {
+      if (!actx) throw new Error('no engine')
+      if (actx.state !== 'running') await Promise.race([actx.resume(), new Promise((r) => setTimeout(r, 1500))])
+      const bin = atob(audio.slice(audio.indexOf(',') + 1))
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const buf = await actx.decodeAudioData(bytes.buffer)
+      playing = actx.createBufferSource()
+      playing.buffer = buf
+      playing.connect(actx.destination)
+      playing.onended = spoken
+      playing.start(0)
+    } catch {
+      fallback(text)
+    }
+  }
+  function fallback(text) {
+    try {
+      const u = new SpeechSynthesisUtterance(text)
+      u.voice = speechSynthesis.getVoices().find((x) => /Samantha/.test(x.name)) || null
+      u.onend = spoken
+      speechSynthesis.speak(u)
+    } catch {
+      spoken()
+    }
+  }
+  player.addEventListener('playing', () => { if (!/silence/.test(player.src) && state !== 'listening') setState('speaking', '') })
+  player.addEventListener('ended', () => { if (!/silence/.test(player.src)) spoken() })
+
+  /** She's finished: a moment to answer back, without a tap. */
+  function spoken() {
+    if (state !== 'speaking' && state !== 'idle') return
+    setState('idle', 'Tap to talk')
+    if (followUp && !document.hidden) listen({ followUp: true })
+  }
+  let followUp = false // whether this answer gets a listening moment after
+
+  /* ------------------------------------------------------------- asking */
+  async function ask(path, bodyData, type) {
+    setState('thinking', 'Thinking…')
+    try {
+      const r = await fetch(path, { method: 'POST', headers: { 'x-yonna-key': KEY, 'x-yonna-session': SESSION, 'content-type': type }, body: bodyData })
+      if (r.status === 401) return location.replace(`/app?k=${encodeURIComponent(KEY)}`)
+      const j = await r.json()
+      connected(true)
+      show($('heard'), j.heard ? '“' + j.heard + '”' : '')
+      show($('say'), j.say || 'No answer.')
+      $('pw').hidden = !j.needPassword
+      // "Call George": the iPhone's call screen, with a button in case it
+      // wants a tap first.
+      $('call').hidden = !j.call
+      if (j.call) {
+        $('call').href = j.call
+        $('call').textContent = 'Call ' + (j.say || '').replace(/^Calling /, '').replace(/\.$/, '')
+        setTimeout(() => { location.href = j.call }, 900)
+      }
+      // A follow-up makes sense after a question or a conversation — not
+      // after a call, a password, or "goodbye".
+      followUp = !j.call && !j.needPassword && !/^(?:bye|goodbye|good night|see you)/i.test(j.say || '') &&
+        !/\b(?:thanks|thank you|that's all|that is all|stop|bye|goodbye|never ?mind)\b/i.test(j.heard || '')
+      setState('speaking', '')
+      speak(j.audio, j.say || '')
+    } catch {
+      connected(false)
+      show($('say'), "I can't reach your Mac. Is it on, and is this phone on the home Wi-Fi?")
+      setState('idle', 'Tap to talk')
+    }
+  }
+
+  // The PC's password: sent once to sign in, then cleared from the field.
+  $('pw').addEventListener('submit', (e) => {
+    e.preventDefault()
+    const password = $('pwfield').value
+    $('pwfield').value = ''
+    $('pwfield').blur()
+    if (!password) return
+    $('pw').hidden = true
+    unlock()
+    show($('say'), 'Signing in on your PC…')
+    ask('/phone/pc-password', JSON.stringify({ password }), 'application/json')
+  })
+
+  /* ---------------------------------------------------------- the Mac link */
+  function connected(ok) {
+    $('link').className = ok ? 'on' : 'off'
+  }
+  async function ping() {
+    try {
+      const r = await fetch('/phone/ping', { headers: { 'x-yonna-key': KEY }, cache: 'no-store' })
+      connected(r.ok)
+    } catch {
+      connected(false)
+    }
+  }
+  ping()
+  setInterval(() => { if (!document.hidden) ping() }, 20000)
+
+  /* ------------------------------------------------------------- listening */
+  // The microphone stays ready while Yonna is open — the last half second is
+  // always kept, so nothing said right after a tap is lost — and is switched
+  // off while she answers (an iPhone plays sound only quietly while the
+  // microphone is on) and whenever Yonna is left. She notices on her own when
+  // a sentence has ended. What was said goes to the Mac as 16 kHz WAV.
+  const RATE = 16000
+  let stream = null, src = null, mctx = null, node = null
+  let ring = [] // the moments before listening started
+  let take = null // while listening: { chunks, started, spoke, quietSince, held, followUp }
+  let floor = 0.004 // the room's own noise, learnt while nobody talks
+  let pressedAt = 0
+
+  /** The sound engine that reads the microphone: made once, by a touch. */
+  function engine() {
+    if (mctx) return mctx
+    mctx = new (window.AudioContext || window.webkitAudioContext)()
+    node = mctx.createScriptProcessor(2048, 1, 1)
+    const ratio = mctx.sampleRate / RATE
+    node.onaudioprocess = (ev) => {
+      if (!stream) return
+      const input = ev.inputBuffer.getChannelData(0)
+      const out = new Float32Array(Math.floor(input.length / ratio))
+      let sum = 0
+      for (let i = 0; i < out.length; i++) {
+        const a = Math.floor(i * ratio), b = Math.min(input.length, Math.floor((i + 1) * ratio))
+        let v = 0
+        for (let j = a; j < b; j++) v += input[j]
+        out[i] = v / Math.max(1, b - a)
+        sum += out[i] * out[i]
+      }
+      const rms = Math.sqrt(sum / Math.max(1, out.length))
+      level = Math.min(1, rms * 14)
+      if (take) heard(out, rms)
+      else {
+        floor = floor * 0.95 + Math.min(rms, 0.05) * 0.05
+        ring.push(out)
+        while (ring.length > 4) ring.shift()
+      }
+    }
+    node.connect(mctx.destination)
+    return mctx
+  }
+
+  async function micOn() {
+    if (stream || document.hidden) return !!stream
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      if (!mctx) { stream.getTracks().forEach((t) => t.stop()); stream = null; return false }
+      src = mctx.createMediaStreamSource(stream)
+      src.connect(node)
+      if (mctx.state !== 'running') await mctx.resume().catch(() => {})
+      return true
+    } catch {
+      stream = null
+      return false
+    }
+  }
+  function micOff() {
+    try { src?.disconnect() } catch {}
+    stream?.getTracks().forEach((t) => t.stop())
+    stream = null
+    src = null
+    level = 0
+    ring = []
+  }
+
+  /** While listening: keep what comes in, and notice the end of a sentence. */
+  function heard(out, rms) {
+    take.chunks.push(out)
+    const now = Date.now()
+    if (rms > Math.max(floor * 3, 0.012)) { take.spoke = true; take.quietSince = 0 }
+    else if (!take.quietSince) take.quietSince = now
+    if (take.held) return // held down: the finger decides
+    const quiet = take.quietSince ? now - take.quietSince : 0
+    if (take.spoke && quiet > 1000) return finish()
+    if (!take.spoke && now - take.started > (take.followUp ? 4500 : 6000)) return finish()
+    if (now - take.started > 25000) return finish()
+  }
+
+  async function listen({ followUp: after = false } = {}) {
+    setState('waiting', after ? '' : 'One moment…')
+    const ok = await micOn()
+    // Readied without a touch, the engine may not run: then a tap it is.
+    if (!ok || !mctx || mctx.state !== 'running') {
+      setState('idle', 'Tap to talk')
+      if (!after && !ok) show($('say'), 'Allow the microphone for Yonna to talk to her.')
+      return
+    }
+    take = { chunks: [...ring], started: Date.now(), spoke: false, quietSince: 0, held: false, followUp: after }
+    ring = []
+    setState('listening', 'Listening…')
+  }
+
+  function finish() {
+    if (!take) return
+    const t = take
+    take = null
+    micOff()
+    if (!t.spoke) {
+      // Nothing said: after a follow-up that's simply the end of the chat.
+      if (!t.followUp) show($('say'), "I didn't hear anything.")
+      setState('idle', 'Tap to talk')
+      return
+    }
+    show($('heard'), '')
+    ask('/phone/audio', wav(t.chunks), 'audio/wav')
+  }
+
+  /** 16 kHz, 16-bit, mono WAV. */
+  function wav(chunks) {
+    const n = chunks.reduce((a, c) => a + c.length, 0)
+    const buf = new ArrayBuffer(44 + n * 2)
+    const v = new DataView(buf)
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)) }
+    str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ')
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true)
+    v.setUint32(24, RATE, true); v.setUint32(28, RATE * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true)
+    str(36, 'data'); v.setUint32(40, n * 2, true)
+    let o = 44
+    for (const c of chunks) for (let i = 0; i < c.length; i++, o += 2) v.setInt16(o, Math.max(-1, Math.min(1, c[i])) * 0x7fff, true)
+    return new Blob([buf], { type: 'audio/wav' })
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { take = null; micOff(); hush(); setState('idle', 'Tap to talk') }
+    else ping()
+  })
+
+  /* ---------------------------------------------------------------- touch */
+  // Tap: listen (she stops on her own). Tap while listening: that's all.
+  // Tap while she speaks: she stops and listens. Hold: listen until let go.
+  function down(e) {
+    e.preventDefault()
+    pressedAt = Date.now()
+    unlock() // the touch that lets her answer be heard
+    engine()
+    if (mctx.state !== 'running') mctx.resume().catch(() => {})
+    if (state === 'listening') return finish()
+    if (state === 'speaking') { hush(); followUp = false }
+    else if (state !== 'idle') return
+    try { cv.setPointerCapture(e.pointerId) } catch {}
+    listen()
+    setTimeout(() => { if (take && pressedAt && Date.now() - pressedAt >= 590) take.held = true }, 600)
+  }
+  function up(e) {
+    e.preventDefault()
+    try { cv.releasePointerCapture(e.pointerId) } catch {}
+    const held = Date.now() - pressedAt > 600
+    pressedAt = 0
+    if (take && held) { take.held = false; setTimeout(finish, 250) }
+  }
+  cv.addEventListener('pointerdown', down)
+  cv.addEventListener('pointerup', up)
+  cv.addEventListener('pointercancel', up)
+  cv.addEventListener('contextmenu', (e) => e.preventDefault())
+</script>
+</body>
+</html>

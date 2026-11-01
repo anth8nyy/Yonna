@@ -556,8 +556,9 @@ export async function tryInstant(text: string): Promise<Instant> {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text }),
-      // Quitting every app waits for each to go, a few seconds at most.
-      signal: AbortSignal.timeout(6000),
+      // Quitting every app takes a few seconds; a command for the PC can
+      // wait for it to turn on and sign in first, a few minutes.
+      signal: AbortSignal.timeout(480_000),
     })
     return (await r.json()) as Instant
   } catch {

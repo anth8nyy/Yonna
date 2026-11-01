@@ -1,0 +1,70 @@
+<!doctype html>
+<!--
+  Yonna's lock on the iPhone (served by phone.mjs). The first time, the iPhone
+  makes up a strong password and saves it in its Passwords; after that, opening
+  Yonna asks for Face ID to fill it in, and she opens. The Mac checks it.
+  The key, the mode (setup or unlock) and any error are filled in by phone.mjs.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Yonna">
+<meta name="theme-color" content="#0a0a0b">
+<link rel="manifest" href="/manifest.webmanifest?k=__KEY__">
+<link rel="apple-touch-icon" href="/icon.png">
+<title>Yonna</title>
+<style>
+  :root { --bg: #0a0a0b; --text: #ededeb; --muted: #6b6b70; --line: #1c1c1f; --blue: #9db2ff; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 17px -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  main { height: 100%; display: flex; flex-direction: column; align-items: center; box-sizing: border-box;
+    padding: calc(env(safe-area-inset-top) + 18px) 24px calc(env(safe-area-inset-bottom) + 20px); }
+  .brand { font-size: 12px; letter-spacing: .55em; margin-right: -.55em; color: var(--muted); }
+  .ring { width: 120px; height: 120px; margin-top: 18vh; border-radius: 50%; border: 1px solid var(--line);
+    box-shadow: 0 0 60px rgba(157,178,255,.08) inset; }
+  p { margin: 28px 0 0; max-width: 300px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.45; }
+  form { margin-top: 24px; width: 100%; max-width: 300px; display: flex; flex-direction: column; gap: 10px; }
+  input { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: #111113; color: var(--text);
+    font: 16px -apple-system, system-ui, sans-serif; }
+  input[name=username] { color: var(--muted); }
+  button { padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: none; color: var(--blue);
+    font: 16px -apple-system, system-ui, sans-serif; }
+  .error { color: #ff8a8a; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">YONNA</div>
+  <div class="ring"></div>
+  <p id="say"></p>
+  <form method="post" action="/phone/unlock?k=__KEY__" id="lock">
+    <input name="username" autocomplete="username" value="Yonna" aria-label="Name">
+    <input name="password" type="password" id="pw" required minlength="8" aria-label="Password">
+    <button id="go"></button>
+  </form>
+</main>
+<script>
+  const setup = '__MODE__' === 'setup'
+  const pw = document.getElementById('pw')
+  pw.autocomplete = setup ? 'new-password' : 'current-password'
+  document.getElementById('go').textContent = setup ? 'Save and open' : 'Open'
+  const error = '__ERROR__'
+  const say = document.getElementById('say')
+  say.textContent = error ||
+    (setup
+      ? 'Tap the password box and choose "Use Strong Password" — your iPhone saves it, and from then on Face ID opens Yonna.'
+      : 'Tap the password box, then the Yonna key above the keyboard — Face ID fills it in.')
+  if (error) say.className = 'error'
+  pw.placeholder = setup ? 'Strong password' : 'Password'
+  // Filled by Face ID (the whole password at once, not typed): straight in.
+  let before = 0
+  if (!setup) pw.addEventListener('input', () => {
+    if (pw.value.length >= 8 && pw.value.length - before > 1) document.getElementById('lock').requestSubmit()
+    before = pw.value.length
+  })
+</script>
+</body>
+</html>

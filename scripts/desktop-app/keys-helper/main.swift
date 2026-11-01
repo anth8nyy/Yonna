@@ -22,6 +22,8 @@
 
 import AppKit
 import AVFoundation
+import CoreAudio
+import CoreImage
 import Carbon.HIToolbox
 import Foundation
 import ScreenCaptureKit
@@ -340,60 +342,452 @@ func fixName(_ s: String) -> String {
 // MARK: - Listening
 
 /** Apple's speech recogniser, on the device, for as long as the keys are held. */
+/** A recording, as text, recognised on this Mac. Empty if nothing was heard. */
+/// hints: words it should expect — the user's contacts, lights and apps —
+/// which it otherwise mishears (unusual names, "Valorant", "eSchool").
+func transcribeFile(_ path: String, hints: [String] = [], done: @escaping (String) -> Void) {
+    guard let rec = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), rec.isAvailable else { return done("") }
+    let req = SFSpeechURLRecognitionRequest(url: URL(fileURLWithPath: path))
+    req.contextualStrings = Array(hints.prefix(100))
+    req.taskHint = .dictation
+    if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
+    req.shouldReportPartialResults = false
+    var answered = false
+    let finish: (String) -> Void = { t in
+        DispatchQueue.main.async {
+            guard !answered else { return }
+            answered = true
+            done(t)
+        }
+    }
+    _ = rec.recognitionTask(with: req) { result, error in
+        if let result, result.isFinal { finish(result.bestTranscription.formattedString) }
+        else if error != nil { finish(result?.bestTranscription.formattedString ?? "") }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 20) { finish("") }
+}
+
+// MARK: - Speaking, for the iPhone
+
+/**
+ * Her answers to the iPhone as sound files, in the Mac's own voice (the same
+ * one `say` uses). `say` loads the voice afresh every time — about a second —
+ * while this keeps it loaded, so a reply's sound is ready almost at once.
+ * One at a time; the rest wait their turn.
+ */
+final class PhoneVoice: NSObject, NSSpeechSynthesizerDelegate {
+    let synth = NSSpeechSynthesizer()
+    var queue: [(text: String, path: String, done: (Bool) -> Void)] = []
+    var current: ((Bool) -> Void)?
+
+    override init() {
+        super.init()
+        synth.delegate = self
+    }
+
+    // Messages arrive on the connection's thread; speech needs the main one,
+    // whose run loop delivers "finished".
+    func speak(_ text: String, to path: String, done: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async {
+            self.queue.append((text, path, done))
+            self.next()
+        }
+    }
+
+    private func next() {
+        guard current == nil, !queue.isEmpty else { return }
+        let job = queue.removeFirst()
+        current = job.done
+        if !synth.startSpeaking(job.text, to: URL(fileURLWithPath: job.path)) { finish(false) }
+    }
+
+    private func finish(_ ok: Bool) {
+        let done = current
+        current = nil
+        done?(ok)
+        next()
+    }
+
+    func speechSynthesizer(_ sender: NSSpeechSynthesizer, didFinishSpeaking finishedSpeaking: Bool) {
+        finish(finishedSpeaking)
+    }
+}
+let phoneVoice = PhoneVoice()
+
+// MARK: - Placing a call
+
+/**
+ * After Yonna asks macOS to call someone through the iPhone, macOS shows a
+ * "<name> — Click to Call" notice with a green button. This presses it, as the
+ * user would — Yonna Keys already has Accessibility for the fn key. Only a
+ * button (or notice action) that says Call is ever pressed; it gives up after
+ * a few seconds. done(true) when it pressed one; `seen` names what was there.
+ */
+func pressCallPrompt(done: @escaping (Bool, [String]) -> Void) {
+    let words = ["call", "κλήση", "κλήσης"]
+    var seen: [String] = []
+    func attr(_ e: AXUIElement, _ a: String) -> String {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(e, a as CFString, &v)
+        return (v as? String) ?? ""
+    }
+    func isCall(_ s: String) -> Bool {
+        let l = s.lowercased().trimmingCharacters(in: .whitespaces)
+        return words.contains(l)
+    }
+    func search(_ e: AXUIElement, _ depth: Int) -> Bool {
+        if depth > 12 { return false }
+        let role = attr(e, kAXRoleAttribute)
+        let title = attr(e, kAXTitleAttribute), desc = attr(e, kAXDescriptionAttribute)
+        if role == kAXButtonRole as String {
+            if !(title + desc).isEmpty { seen.append(title.isEmpty ? desc : title) }
+            if isCall(title) || isCall(desc) { return click(e) }
+        }
+        // A notice's own actions ("Name:Call\nTarget:…").
+        var names: CFArray?
+        if AXUIElementCopyActionNames(e, &names) == .success, let list = names as? [String] {
+            for n in list where n.hasPrefix("Name:") {
+                let label = String(n.dropFirst(5).split(separator: "\n").first ?? "")
+                seen.append(label)
+                if isCall(label) { return AXUIElementPerformAction(e, n as CFString) == .success }
+            }
+        }
+        var kids: CFTypeRef?
+        AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &kids)
+        for k in (kids as? [AXUIElement]) ?? [] where search(k, depth + 1) { return true }
+        return false
+    }
+    /// A real click in the middle of the button — the notice ignores an
+    /// accessibility "press" — with the pointer put back where it was.
+    func click(_ e: AXUIElement) -> Bool {
+        var p: CFTypeRef?, z: CFTypeRef?
+        AXUIElementCopyAttributeValue(e, kAXPositionAttribute as CFString, &p)
+        AXUIElementCopyAttributeValue(e, kAXSizeAttribute as CFString, &z)
+        var pos = CGPoint.zero, size = CGSize.zero
+        guard let p, let z, AXValueGetValue(p as! AXValue, .cgPoint, &pos), AXValueGetValue(z as! AXValue, .cgSize, &size), size.width > 0 else {
+            return AXUIElementPerformAction(e, kAXPressAction as CFString) == .success
+        }
+        let at = CGPoint(x: pos.x + size.width / 2, y: pos.y + size.height / 2)
+        let back = CGEvent(source: nil)?.location ?? at
+        let src = CGEventSource(stateID: .hidSystemState)
+        CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: at, mouseButton: .left)?.post(tap: .cghidEventTap)
+        usleep(120_000) // the notice shows its buttons on hover
+        CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: at, mouseButton: .left)?.post(tap: .cghidEventTap)
+        usleep(60_000)
+        CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: at, mouseButton: .left)?.post(tap: .cghidEventTap)
+        usleep(60_000)
+        CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: back, mouseButton: .left)?.post(tap: .cghidEventTap)
+        return true
+    }
+    var tries = 0
+    func attempt() {
+        tries += 1
+        seen = []
+        let nc = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.notificationcenterui").first
+        if let pid = nc?.processIdentifier, search(AXUIElementCreateApplication(pid), 0) { return done(true, seen) }
+        if tries >= 16 { return done(false, seen) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: attempt)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: attempt)
+}
+
+/**
+ * The Mac's own microphone — used instead of Bluetooth headphones' one. When
+ * AirPods are the microphone, macOS switches them into phone-call mode while
+ * listening, and music or a video in them turns muffled and quiet; with the
+ * built-in microphone they keep playing in full quality.
+ */
+func builtInMicrophone() -> AudioDeviceID? {
+    var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr else { return nil }
+    var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else { return nil }
+    for id in ids {
+        var transport: UInt32 = 0, tsize = UInt32(MemoryLayout<UInt32>.size)
+        var taddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(id, &taddr, 0, nil, &tsize, &transport) == noErr, transport == kAudioDeviceTransportTypeBuiltIn else { continue }
+        var saddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+        var ssize: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(id, &saddr, 0, nil, &ssize) == noErr, ssize > 0 { return id }
+    }
+    return nil
+}
+
+/** Whether the system's microphone right now is a Bluetooth one (AirPods). */
+func defaultMicIsBluetooth() -> Bool {
+    var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var id: AudioDeviceID = 0, size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr else { return false }
+    var transport: UInt32 = 0, tsize = UInt32(MemoryLayout<UInt32>.size)
+    var taddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    guard AudioObjectGetPropertyData(id, &taddr, 0, nil, &tsize, &transport) == noErr else { return false }
+    return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+}
+
+/** A microphone's ID that the audio APIs take: its unique name. */
+func deviceUID(_ id: AudioDeviceID) -> CFString? {
+    var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceUID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var uid: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &uid) == noErr else { return nil }
+    return uid?.takeRetainedValue()
+}
+
+// MARK: - The camera window
+
+/**
+ * "Take a look at my desk": a small window showing what the camera sees —
+ * the desk webcam (a Logitech) when it's plugged in, else the Mac's own.
+ * Nothing is described on its own; while the window is open, each question
+ * asked with fn comes with a picture from it, so "how do I connect this?" is
+ * answered about what's actually in front of the camera. Closed with its ✕,
+ * "close the camera", or after a quarter of an hour.
+ */
+final class CameraPanel: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private var panel: NSPanel?
+    private let session = AVCaptureSession()
+    private let output = AVCaptureVideoDataOutput()
+    private let queue = DispatchQueue(label: "local.yonna.camera")
+    private let lock = NSLock()
+    private var latest: CIImage?
+    private var ready = false
+    private var closeTimer: Timer?
+    var isOpen: Bool { panel?.isVisible == true }
+
+    /// The Logitech desk camera when it's plugged in; otherwise the Mac's own
+    /// front camera. Never the iPhone (Continuity Camera).
+    private func pickCamera() -> AVCaptureDevice? {
+        let all = AVCaptureDevice.DiscoverySession(deviceTypes: [.external, .builtInWideAngleCamera],
+                                                   mediaType: .video, position: .unspecified).devices
+            .filter { !$0.localizedName.localizedCaseInsensitiveContains("iphone") && $0.deviceType != .continuityCamera }
+        return all.first { $0.localizedName.localizedCaseInsensitiveContains("logitech") }
+            ?? all.first { $0.deviceType == .builtInWideAngleCamera }
+    }
+
+    /// done(nil) once it's showing, or why it couldn't.
+    func show(_ done: @escaping (String?) -> Void) {
+        AVCaptureDevice.requestAccess(for: .video) { ok in
+            DispatchQueue.main.async {
+                guard ok else { return done("Yonna isn't allowed to use the camera — allow Yonna Keys in Privacy & Security, Camera.") }
+                guard self.setUp() else { return done("I couldn't find a camera.") }
+                self.window().orderFrontRegardless()
+                self.queue.async { if !self.session.isRunning { self.session.startRunning() } }
+                self.closeTimer?.invalidate()
+                self.closeTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: false) { [weak self] _ in self?.hide() }
+                done(nil)
+            }
+        }
+    }
+
+    func hide() {
+        closeTimer?.invalidate()
+        panel?.orderOut(nil)
+        queue.async { if self.session.isRunning { self.session.stopRunning() } }
+        lock.lock(); latest = nil; lock.unlock()
+    }
+
+    /// Chosen afresh each time it opens, so a Logitech plugged in since is used.
+    private func setUp() -> Bool {
+        guard let cam = pickCamera() else { return false }
+        let now = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device.uniqueID }
+        if now == [cam.uniqueID] { return true }
+        guard let input = try? AVCaptureDeviceInput(device: cam) else { return false }
+        session.beginConfiguration()
+        session.inputs.forEach { session.removeInput($0) }
+        session.sessionPreset = .high
+        if session.canAddInput(input) { session.addInput(input) }
+        if !ready {
+            output.setSampleBufferDelegate(self, queue: queue)
+            output.alwaysDiscardsLateVideoFrames = true
+            if session.canAddOutput(output) { session.addOutput(output) }
+            ready = true
+        }
+        session.commitConfiguration()
+        return true
+    }
+
+    private func window() -> NSPanel {
+        if let panel { return panel }
+        let w: CGFloat = 340, h: CGFloat = 255
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        let p = NSPanel(contentRect: NSRect(x: screen.maxX - w - 20, y: screen.maxY - h - 20, width: w, height: h),
+                        styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
+        p.level = .floating
+        p.isMovableByWindowBackground = true
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 16
+        view.layer?.masksToBounds = true
+        view.layer?.backgroundColor = NSColor(red: 0.04, green: 0.04, blue: 0.045, alpha: 1).cgColor
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        preview.frame = view.bounds
+        view.layer?.addSublayer(preview)
+        let close = NSButton(title: "✕", target: self, action: #selector(closeClicked))
+        close.isBordered = false
+        close.font = .systemFont(ofSize: 13, weight: .medium)
+        close.contentTintColor = .white
+        close.wantsLayer = true
+        close.layer?.backgroundColor = NSColor(white: 0, alpha: 0.45).cgColor
+        close.layer?.cornerRadius = 12
+        close.frame = NSRect(x: w - 34, y: h - 34, width: 24, height: 24)
+        view.addSubview(close)
+        p.contentView = view
+        panel = p
+        return p
+    }
+
+    @objc private func closeClicked() { hide() }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sample: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let px = CMSampleBufferGetImageBuffer(sample) else { return }
+        let img = CIImage(cvPixelBuffer: px)
+        lock.lock(); latest = img; lock.unlock()
+    }
+
+    /// The camera's picture now, as a JPEG file, for a question.
+    func snapshot() -> URL? {
+        lock.lock(); let img = latest; lock.unlock()
+        guard let img, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("yonna-camera-\(UUID().uuidString).jpg")
+        do {
+            try CIContext().writeJPEGRepresentation(of: img, to: url, colorSpace: space, options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.8])
+            return url
+        } catch { return nil }
+    }
+}
+
 final class Ears {
     let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    let engine = AVAudioEngine()
-    var request: SFSpeechAudioBufferRecognitionRequest?
+    /// Recording only — an audio queue reads the microphone without touching
+    /// the sound output. (An AVAudioEngine starts the output too, and macOS
+    /// re-sets the headphones for it: music cut out and came back louder.)
+    var queue: AudioQueueRef?
+    let audioQueue = DispatchQueue(label: "local.yonna.ears")
+    /// The recogniser's request now. Apple's recogniser ends a sentence at a
+    /// long pause and starts over; while the key is still held, what was said
+    /// so far is kept (`committed`) and a new request carries on listening —
+    /// so the whole of what was said arrives together on release.
+    private var _request: SFSpeechAudioBufferRecognitionRequest?
+    private let lock = NSLock()
+    var request: SFSpeechAudioBufferRecognitionRequest? {
+        get { lock.lock(); defer { lock.unlock() }; return _request }
+        set { lock.lock(); _request = newValue; lock.unlock() }
+    }
     var task: SFSpeechRecognitionTask?
-    var text = ""
+    var committed = ""
+    var current = ""
+    var text: String { [committed, current].filter { !$0.isEmpty }.joined(separator: " ") }
+    var restarts = 0
     var finished: ((String) -> Void)?
     var partial: ((String) -> Void)?
     var level: ((Float) -> Void)?
     var lastError = ""
 
+    private func newRequest() -> SFSpeechAudioBufferRecognitionRequest {
+        let req = SFSpeechAudioBufferRecognitionRequest()
+        req.shouldReportPartialResults = true
+        if recognizer?.supportsOnDeviceRecognition == true { req.requiresOnDeviceRecognition = true }
+        req.addsPunctuation = true
+        // Names it would otherwise mishear: the apps open now ("Claude", not
+        // "clothing") and Yonna's own words.
+        let open = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap { $0.localizedName }
+        req.contextualStrings = Array((open + ["Yonna", "Valorant", "Brave", "eSchool", "Spotify", "YouTube", "lights", "PC"]).prefix(100))
+        return req
+    }
+
+    /// A recognition of what comes in from now on.
+    private func listenOn() {
+        guard let recognizer else { return }
+        let req = newRequest()
+        request = req
+        task = recognizer.recognitionTask(with: req) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self, req === self.request else { return } // an earlier one, already kept
+                let holding = self.finished == nil && self.queue != nil
+                if let result {
+                    let heard = result.bestTranscription.formattedString
+                    // Started over without saying so (a pause): keep what came before.
+                    if holding, self.current.count > 8, heard.count < self.current.count / 2,
+                       !self.current.lowercased().hasPrefix(heard.lowercased()) {
+                        self.committed = self.text
+                    }
+                    self.current = heard
+                    self.partial?(self.text)
+                    if result.isFinal { holding ? self.carryOn() : self.done() }
+                }
+                if error != nil { holding ? self.carryOn() : self.done() }
+            }
+        }
+    }
+
+    /// A sentence ended mid-press: keep it, and listen on.
+    private func carryOn() {
+        committed = text
+        current = ""
+        restarts += 1
+        if restarts > 30 { return } // something is wrong with the recogniser: stop trying
+        task?.cancel()
+        listenOn()
+    }
+
     func start(partial: @escaping (String) -> Void) -> Bool {
         stopNow()
-        text = ""
+        committed = ""
+        current = ""
+        restarts = 0
         self.partial = partial
         guard let recognizer, recognizer.isAvailable else {
             lastError = "speech recognition is unavailable right now"
             return false
         }
-        let req = SFSpeechAudioBufferRecognitionRequest()
-        req.shouldReportPartialResults = true
-        if recognizer.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
-        req.addsPunctuation = true
-        request = req
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
-            req.append(buf)
-            // Loudness for the box's wave.
-            if let ch = buf.floatChannelData?[0] {
-                let n = Int(buf.frameLength)
+        // 16 kHz mono, which the recogniser likes; the queue converts to it.
+        let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        var asbd = AudioStreamBasicDescription(mSampleRate: 16000, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked, mBytesPerPacket: 4, mFramesPerPacket: 1,
+            mBytesPerFrame: 4, mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
+        var q: AudioQueueRef?
+        let made = AudioQueueNewInputWithDispatchQueue(&q, &asbd, 0, audioQueue) { [weak self] aq, buf, _, _, _ in
+            let bytes = Int(buf.pointee.mAudioDataByteSize)
+            let frames = bytes / 4
+            if frames > 0, let pcm = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frames)) {
+                pcm.frameLength = AVAudioFrameCount(frames)
+                memcpy(pcm.floatChannelData![0], buf.pointee.mAudioData, bytes)
+                self?.request?.append(pcm)
+                // Loudness for the box's wave.
+                let ch = pcm.floatChannelData![0]
                 var sum: Float = 0
-                for i in stride(from: 0, to: n, by: 4) { sum += ch[i] * ch[i] }
-                let rms = sqrt(sum / Float(max(1, n / 4)))
-                let v = min(1, rms * 12)
+                for i in stride(from: 0, to: frames, by: 2) { sum += ch[i] * ch[i] }
+                let v = min(1, sqrt(sum / Float(max(1, frames / 2))) * 12)
                 DispatchQueue.main.async { self?.level?(v) }
             }
+            if self?.queue != nil { AudioQueueEnqueueBuffer(aq, buf, 0, nil) }
         }
-        engine.prepare()
-        do { try engine.start() } catch {
-            lastError = error.localizedDescription
+        guard made == noErr, let q else {
+            lastError = "no microphone is available right now"
             return false
         }
-        task = recognizer.recognitionTask(with: req) { [weak self] result, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let result {
-                    self.text = result.bestTranscription.formattedString
-                    self.partial?(self.text)
-                    if result.isFinal { self.done() }
-                }
-                if error != nil { self.done() }
-            }
+        // Headphones' microphone would put them in call mode: the Mac's own instead.
+        if defaultMicIsBluetooth(), let mic = builtInMicrophone(), var uid = deviceUID(mic) {
+            AudioQueueSetProperty(q, kAudioQueueProperty_CurrentDevice, &uid, UInt32(MemoryLayout<CFString>.size))
+        }
+        for _ in 0..<3 {
+            var b: AudioQueueBufferRef?
+            if AudioQueueAllocateBuffer(q, 3200, &b) == noErr, let b { AudioQueueEnqueueBuffer(q, b, 0, nil) }
+        }
+        queue = q
+        listenOn()
+        let started = AudioQueueStart(q, nil)
+        guard started == noErr else {
+            lastError = "the microphone wouldn't start (\(started))"
+            stopQueue()
+            task?.cancel()
+            request = nil
+            return false
         }
         return true
     }
@@ -401,9 +795,8 @@ final class Ears {
     /** Stop listening; `then` gets the final words (or what was heard, after a moment). */
     func finish(_ then: @escaping (String) -> Void) {
         finished = then
+        stopQueue()
         request?.endAudio()
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.done() }
     }
 
@@ -416,14 +809,20 @@ final class Ears {
         f(text)
     }
 
+    private func stopQueue() {
+        guard let q = queue else { return }
+        queue = nil
+        AudioQueueStop(q, true)
+        AudioQueueDispose(q, true)
+    }
+
     func stopNow() {
         finished = nil
         task?.cancel()
         task = nil
         request?.endAudio()
         request = nil
-        if engine.isRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
+        stopQueue()
     }
 }
 
@@ -528,6 +927,7 @@ final class Voice {
 
 final class Keys: NSObject, NSApplicationDelegate {
     let box = Box()
+    let camera = CameraPanel()
     /** Zoom, Meet and Teams meetings: see meeting.swift. */
     let meeting = Meeting()
     let ears = Ears()
@@ -707,6 +1107,91 @@ final class Keys: NSObject, NSApplicationDelegate {
               let m = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = m["type"] as? String else { return }
         if type == "pages" { appOpen = (m["open"] as? Bool) ?? false; return }
+        // The iPhone page's recording, saved by the bridge: what was said, as
+        // text — with this Mac's own recogniser, on the Mac.
+        if type == "transcribe", let id = m["id"] as? String, let path = m["path"] as? String {
+            transcribeFile(path, hints: (m["hints"] as? [String]) ?? []) { [weak self] text in self?.send(["type": "transcribed", "id": id, "text": text]) }
+            return
+        }
+        // The PC is at its sign-in screen: its password, typed here, passed on
+        // to sign in once. Never kept.
+        if type == "password", let id = m["id"] as? String {
+            DispatchQueue.main.async { [weak self] in
+                let a = NSAlert()
+                a.messageText = "Your PC's password"
+                a.informativeText = "Your PC is at its sign-in screen. Yonna signs you in with this once, then forgets it."
+                let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+                field.placeholderString = "Password"
+                a.accessoryView = field
+                a.addButton(withTitle: "Sign In")
+                a.addButton(withTitle: "Cancel")
+                a.window.initialFirstResponder = field
+                NSApp.activate(ignoringOtherApps: true)
+                let ok = a.runModal() == .alertFirstButtonReturn
+                self?.send(["type": "password", "id": id, "text": ok ? field.stringValue : NSNull()])
+                field.stringValue = ""
+            }
+            return
+        }
+        // Yonna's AI asking to see ("what's on my desk?"): the camera window
+        // opened (it stays, so they see what she sees) and a picture sent back.
+        if type == "capture", let id = m["id"] as? String {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.camera.show { problem in
+                    if let problem { return self.send(["type": "reply", "id": id, "error": problem]) }
+                    // A moment for the camera to deliver its first picture.
+                    func grab(_ tries: Int) {
+                        if let url = self.camera.snapshot(), let data = try? Data(contentsOf: url) {
+                            try? FileManager.default.removeItem(at: url)
+                            return self.send(["type": "reply", "id": id, "data": data.base64EncodedString(), "mimeType": "image/jpeg"])
+                        }
+                        if tries <= 0 { return self.send(["type": "reply", "id": id, "error": "The camera didn't send a picture."]) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { grab(tries - 1) }
+                    }
+                    grab(25)
+                }
+            }
+            return
+        }
+        // For fixing the call press: what the notice is made of, pressing nothing.
+        if type == "describeCall" {
+            DispatchQueue.main.async { [weak self] in
+                var lines: [String] = []
+                func attr(_ e: AXUIElement, _ a: String) -> String {
+                    var v: CFTypeRef?
+                    AXUIElementCopyAttributeValue(e, a as CFString, &v)
+                    return (v as? String) ?? ""
+                }
+                func walk(_ e: AXUIElement, _ d: Int) {
+                    if d > 12 || lines.count > 80 { return }
+                    var names: CFArray?
+                    AXUIElementCopyActionNames(e, &names)
+                    let acts = ((names as? [String]) ?? []).map { $0.replacingOccurrences(of: "\n", with: " | ") }
+                    lines.append(String(repeating: " ", count: d) + [attr(e, kAXRoleAttribute), attr(e, kAXSubroleAttribute), attr(e, kAXTitleAttribute), attr(e, kAXDescriptionAttribute), attr(e, kAXIdentifierAttribute), acts.joined(separator: ",")].joined(separator: " · "))
+                    var kids: CFTypeRef?
+                    AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &kids)
+                    for k in (kids as? [AXUIElement]) ?? [] { walk(k, d + 1) }
+                }
+                if let nc = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.notificationcenterui").first {
+                    walk(AXUIElementCreateApplication(nc.processIdentifier), 0)
+                }
+                self?.send(["type": "callDescribed", "lines": lines])
+            }
+            return
+        }
+        // A call Yonna just asked macOS to make: press its Call button.
+        if type == "pressCall" {
+            DispatchQueue.main.async { [weak self] in
+                pressCallPrompt { ok, seen in self?.send(["type": "callPressed", "ok": ok, "seen": Array(Set(seen)).prefix(12).map { $0 }]) }
+            }
+            return
+        }
+        // An answer for the iPhone, as a sound file.
+        if type == "speak", let id = m["id"] as? String, let text = m["text"] as? String, let path = m["path"] as? String {
+            phoneVoice.speak(text, to: path) { [weak self] ok in self?.send(["type": "spoken", "id": id, "ok": ok]) }
+            return
+        }
         if let a = m["ask"] as? String, a != askId { return }
         switch type {
         case "text":
@@ -807,14 +1292,25 @@ final class Keys: NSObject, NSApplicationDelegate {
         NSLog("YonnaKeys: hotkey %@", status == noErr ? "registered" : "FAILED (\(status))")
     }
 
+    var downAt = Date.distantPast
+
+    /** A line in Yonna's log, for seeing what a press did. */
+    func note(_ text: String) { send(["type": "log", "text": text]) }
+
     func pressed() {
-        // Already held: a repeat. (A press whose release never arrived is
-        // ended by watchRelease, so it cannot block this one.)
-        guard !down else { return }
+        // Already held: a repeat. A press stuck "down" for over a minute lost
+        // its release somewhere: ended now, so this one counts.
+        if down && Date().timeIntervalSince(downAt) > 60 {
+            note("fn: an old press was stuck — reset")
+            down = false
+        }
+        guard !down else { return note("fn: ignored (already listening)") }
         down = true
+        downAt = Date()
         watchRelease()
         // The Yonna window is open: talk to it there, no box.
         if connected && appOpen {
+            note("fn: talking in the Yonna window")
             viaApp = true
             voice.reset()
             box.hide()
@@ -830,6 +1326,7 @@ final class Keys: NSObject, NSApplicationDelegate {
         if !connected { startBrain() }
         writeStatus()
         if let why = missing() {
+            note("fn: a permission is missing — \(why)")
             box.show(title: "Yonna · needs a permission", question: "", answer: why)
             box.hide(after: 12)
             down = false
@@ -842,6 +1339,7 @@ final class Keys: NSObject, NSApplicationDelegate {
         box.show(title: "Yonna · listening",
                  question: listening ? "…" : "The microphone wouldn't start (\(ears.lastError)). Try again in a moment.",
                  answer: "")
+        note(listening ? "fn: listening" : "fn: microphone wouldn't start (\(ears.lastError))")
         // The screen as it is now, and the mouse from here until release.
         capture = nil
         captured = false
@@ -910,10 +1408,18 @@ final class Keys: NSObject, NSApplicationDelegate {
             self.fnWithKey = true
             self.fnHold?.cancel()
         }
+        // With Accessibility this only ever ends a press whose "up" macOS lost
+        // (which left fn looking held and every later press ignored). It never
+        // starts one: macOS marks arrow keys and others as "fn" too, and holding
+        // one used to open the box.
         fnPoll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self, !AXIsProcessTrusted() else { return }
+            guard let self else { return }
             let down = CGEventSource.flagsState(.combinedSessionState).contains(.maskSecondaryFn)
-            if down != self.fnIsDown { self.fn(down) }
+            if AXIsProcessTrusted() {
+                if !down && self.fnIsDown { self.fn(false) }
+            } else if down != self.fnIsDown {
+                self.fn(down)
+            }
         }
         RunLoop.main.add(fnPoll!, forMode: .common)
     }
@@ -956,6 +1462,24 @@ final class Keys: NSObject, NSApplicationDelegate {
             box.hide()
             return
         }
+        // The camera window: opened or closed, nothing more said.
+        let l = said.lowercased()
+        if l.range(of: #"\b(close|hide|turn off|stop)( the)? camera\b|\bcamera off\b|\bstop (looking|watching)\b"#, options: .regularExpression) != nil {
+            camera.hide()
+            box.show(title: "Yonna", answer: "Okay.")
+            voice.speak("Okay.")
+            box.hide(after: 2)
+            return
+        }
+        if l.range(of: #"\b(take a look|look|have a look|watch)( at)? (my|the) (desk|table)\b|\bshow me (my|the) (desk|camera)\b|\b(open|turn on)( the)? camera\b|\bcamera on\b"#, options: .regularExpression) != nil {
+            camera.show { [weak self] problem in
+                let line = problem ?? "Okay, I can see it."
+                self?.box.show(title: "Yonna", answer: line)
+                self?.voice.speak(line)
+                self?.box.hide(after: problem == nil ? 2 : 8)
+            }
+            return
+        }
         box.show(title: "Yonna · thinking", question: said, answer: "")
         let pts = path
         // The screenshot may still be finishing, and the brain may still be starting.
@@ -969,7 +1493,15 @@ final class Keys: NSObject, NSApplicationDelegate {
                 box.hide(after: 6)
                 return
             }
-            if let cap = capture, let a = annotate(cap, path: pts) {
+            if camera.isOpen, let shot = camera.snapshot() {
+                // The camera window is open: what it sees comes with the question.
+                var v: [String: Any] = ["type": "vision", "image": shot.path,
+                    "note": "The first picture is from the camera window the user opened, pointed at their desk, taken just now. " +
+                        "Use it when they ask about something in front of them — how to connect or set up a thing, what something is. " +
+                        "Don't describe it unless that's what they asked." + (capture != nil ? " The second picture is their screen." : "")]
+                if let cap = capture, let a = annotate(cap, path: pts) { v["crop"] = a.image.path }
+                send(v)
+            } else if let cap = capture, let a = annotate(cap, path: pts) {
                 var v: [String: Any] = ["type": "vision", "image": a.image.path, "note": a.note]
                 if let c = a.crop { v["crop"] = c.path }
                 send(v)
@@ -985,7 +1517,7 @@ final class Keys: NSObject, NSApplicationDelegate {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": said])
-        req.timeoutInterval = 6
+        req.timeoutInterval = 480 // the PC may need turning on, and signing in, first
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             DispatchQueue.main.async {
                 guard let self else { return }

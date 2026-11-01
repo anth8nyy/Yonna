@@ -15,7 +15,8 @@
  *   node bridge/server.mjs
  */
 
-import { WebSocketServer } from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
@@ -28,8 +29,14 @@ import { forgetMemory, loadMemories, memoryPrompt, memoryServer } from './memory
 import { startIMessage } from './imessage.mjs'
 import { filesServer } from './files.mjs'
 import { instant } from './instant.mjs'
+import { openPc } from './pc.mjs'
+import { contactWords, onCallPrompt } from './calls.mjs'
+import { lightsConfig } from './lights.mjs'
+import { watchAway } from './away.mjs'
+import { installedApps } from './apps.mjs'
 import { weatherServer } from './weather.mjs'
 import { macServer } from './mac.mjs'
+import { startPhone } from './phone.mjs'
 import { spawn } from 'node:child_process'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
@@ -328,7 +335,7 @@ function decideTool(name) {
 }
 
 const SYSTEM_PROMPT = `You are Yonna (said "YON-na"), a woman, speaking out loud to one person. If
-you refer to yourself it is as Yonna, she/her. You were once called Yonna;
+you refer to yourself it is as Yonna, she/her. You were once called Jarvis;
 never call yourself that.
 
 How you talk:
@@ -348,6 +355,11 @@ How you talk:
 - If something didn't work or you can't do it, just say it plainly and
   simply ("That didn't work — Spotify isn't installed."). No apologising
   speeches.
+- When they ask you to do something (open or close apps, lights, the PC,
+  music, a setting) and it worked, answer in a word or two — "Done.", "Got
+  it.", "All set.", varied, not the same every time — never list what you
+  closed or opened, never repeat their request back. Say more only if it
+  didn't work, needs their choice, or they asked a question.
 - Plain spoken words only: no markdown, lists, emoji or asterisks. Numbers,
   dates and times as you'd say them ("eight fifteen", "the first of August").
 - Never narrate tool use ("Let me search", "I'll take a look", "One sec") —
@@ -725,7 +737,227 @@ function corsFor(req) {
 // One HTTP server for both the speech proxy and the WebSocket upgrade.
 const http = await import('node:http')
 
+/** This Mac itself (not another device on the Wi-Fi). */
+const fromThisMac = (req) => /^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(req.socket?.remoteAddress ?? '')
+
+/** Recordings from the iPhone page waiting for the shortcut helper (it has
+ *  Speech Recognition) to turn them into text. */
+const transcribing = new Map()
+function transcribe(path) {
+  if (![...keysClients].some((k) => k.readyState === k.OPEN)) return Promise.resolve(null)
+  const id = randomBytes(6).toString('hex')
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      transcribing.delete(id)
+      resolve(null)
+    }, 25_000)
+    transcribing.set(id, (text) => {
+      clearTimeout(timer)
+      resolve(text)
+    })
+    hintWords().then((hints) => toKeys({ type: 'transcribe', id, path, hints }))
+  })
+}
+
+/** The PC's password, asked for in the shortcut helper's box on this Mac when
+ *  the PC is at its sign-in screen. Passed straight on, never logged or kept;
+ *  null if the box is closed or the helper isn't running. */
+const passwords = new Map()
+function askKeysPassword() {
+  if (![...keysClients].some((k) => k.readyState === k.OPEN)) return Promise.resolve(null)
+  const id = randomBytes(6).toString('hex')
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      passwords.delete(id)
+      resolve(null)
+    }, 180_000)
+    passwords.set(id, (text) => {
+      clearTimeout(timer)
+      resolve(text || null)
+    })
+    toKeys({ type: 'password', id })
+  })
+}
+
+/** Words the recognizer should expect: Yonna's own, the user's lights and
+ *  apps, and their contacts' names (it mishears names like "Valorant"…). */
+async function hintWords() {
+  const fixed = ['Yonna', 'PC', 'Valorant', 'Brave', 'eSchool', 'YouTube', 'Gmail', 'Instagram', 'Spotify', 'Discord',
+    'lights', 'dim', 'brightness', 'shut down', 'turn on my PC', 'open my PC', 'call']
+  let apps = []
+  try { apps = [...installedApps().keys()].filter((n) => !n.startsWith('.')) } catch {}
+  const people = await contactWords().catch(() => [])
+  const lights = lightsConfig().map((b) => b.name)
+  // Commands and lights first: only the first hundred count.
+  return [...new Set([...fixed, ...lights, ...people, ...apps])].slice(0, 100)
+}
+
+/** An answer for the iPhone spoken to a sound file by the shortcut helper,
+ *  which keeps the voice loaded (`say` takes a second to load it each time).
+ *  False when the helper isn't there, so the phone app falls back to `say`. */
+const speaking = new Map()
+function speakTo(text, path) {
+  if (![...keysClients].some((k) => k.readyState === k.OPEN)) return Promise.resolve(false)
+  const id = randomBytes(6).toString('hex')
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      speaking.delete(id)
+      resolve(false)
+    }, 15_000)
+    speaking.set(id, (ok) => {
+      clearTimeout(timer)
+      resolve(ok)
+    })
+    toKeys({ type: 'speak', id, text, path })
+  })
+}
+
+/**
+ * The phone's key: other devices on the home network may use only /phone,
+ * and only with this (in ~/Library/Application Support/Yonna/phone-key,
+ * made once). Everything else answers this Mac alone — the bridge listens on
+ * the whole network, and without this any device on the Wi-Fi could close
+ * apps or shut the PC down.
+ */
+const PHONE_KEY_FILE = join(homedir(), 'Library/Application Support/Yonna/phone-key')
+/** The PC helper's own key, made once; installed on the PC by scripts/pc/install.mjs. */
+const PC_KEY_FILE = join(homedir(), 'Library/Application Support/Yonna/pc-key')
+function pcKey() {
+  try {
+    return readFileSync(PC_KEY_FILE, 'utf8').trim()
+  } catch {
+    const key = randomBytes(24).toString('base64url')
+    try {
+      writeFileSync(PC_KEY_FILE, key + '\n', { mode: 0o600 })
+    } catch {
+      /* fine */
+    }
+    return key
+  }
+}
+
+function phoneKey() {
+  try {
+    return readFileSync(PHONE_KEY_FILE, 'utf8').trim()
+  } catch {
+    const key = randomBytes(24).toString('base64url')
+    try {
+      writeFileSync(PHONE_KEY_FILE, key + '\n', { mode: 0o600 })
+    } catch {
+      /* fine */
+    }
+    return key
+  }
+}
+
+/** One conversation for the phone, kept between asks, like the shortcut box's. */
+let phoneSocket = null
+/**
+ * Asked on the Windows PC (its Left Ctrl helper, scripts/pc/yonna-talk.ps1):
+ * opening and closing apps, and shutting down, mean the PC there.
+ */
+function askFromPc(text, extra = {}) {
+  let t = String(text ?? '').trim()
+  // The camera window (the PC's Logitech): opened or closed there, nothing more said.
+  if (/\b(?:close|hide|turn off|stop)(?: the)? camera\b|\bcamera off\b|\bstop (?:looking|watching)\b/i.test(t)) {
+    extra.camera = 'close'
+    return Promise.resolve('Okay.')
+  }
+  if (/\b(?:take a look|look|have a look|watch)(?: at)? (?:my|the) (?:desk|table)\b|\bshow me (?:my|the) (?:desk|camera)\b|\b(?:open|turn on)(?: the)? camera\b|\bcamera on\b/i.test(t)) {
+    extra.camera = 'open'
+    return Promise.resolve('Okay, I can see it.')
+  }
+  const where = /\b(?:on|in) (?:my |the |this )?(?:mac|macbook|laptop|pc|computer|windows|desktop)\b/i
+  if (/^(?:please |can you |could you )?(?:open|launch|start|close|quit|exit)\b/i.test(t) && !where.test(t) && !/\blights?\b/i.test(t)) t += ' on my PC'
+  if (/^(?:shut ?down|turn off|power off|restart)(?: (?:this|the) (?:pc|computer))?[.!]?$/i.test(t)) t = 'shut down my PC'
+  return askFromPhone(t, {}, "the user's Windows PC")
+}
+
+async function askFromPhone(text, extra = {}, origin = "the user's iPhone") {
+  const quick = await instant(text, { from: 'phone' }).catch(() => ({ handled: false }))
+  // A call to make goes back to the phone, which dials it.
+  if (quick.call) extra.call = quick.call
+  if (quick.handled) return quick.say || 'Done.'
+  if (!phoneSocket || phoneSocket.readyState > 1) {
+    phoneSocket = new WebSocket(`ws://127.0.0.1:${PORT}/?client=keys&internal=1`, { origin: 'http://localhost:5173' })
+    await new Promise((ok, fail) => {
+      phoneSocket.once('open', ok)
+      phoneSocket.once('error', fail)
+    })
+  }
+  const id = randomBytes(6).toString('hex')
+  return new Promise((resolve) => {
+    let said = ''
+    const timer = setTimeout(() => finish('That took too long — try again.'), 90_000)
+    const on = (raw) => {
+      let m
+      try {
+        m = JSON.parse(raw)
+      } catch {
+        return
+      }
+      if (m.ask !== id) return
+      if (m.type === 'text') said += m.delta ?? ''
+      if (m.type === 'done') finish(m.text || said || 'Done.')
+      // Out of AI (no tokens left, offline): commands still work without it.
+      if (m.type === 'error') finish("I can't answer questions right now — but commands like opening apps or turning your PC on and off still work.")
+    }
+    function finish(t) {
+      clearTimeout(timer)
+      phoneSocket.off('message', on)
+      resolve(t)
+    }
+    phoneSocket.on('message', on)
+    phoneSocket.send(JSON.stringify({ type: 'ask', id, text: `[Asked from ${origin}; answer in one short spoken sentence.]\n${text}` }))
+  })
+}
+
 const handleRequest = async (req, res) => {
+  // The iPhone: the one door open to the home network, behind its key.
+  if (req.method === 'POST' && req.url === '/phone') {
+    const given = String(req.headers['x-yonna-key'] ?? '')
+    const want = phoneKey()
+    const a = Buffer.from(given)
+    const b = Buffer.from(want)
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      console.warn(`[yonna] refused /phone from ${req.socket?.remoteAddress}: wrong key`)
+      res.writeHead(403)
+      return res.end('forbidden')
+    }
+    let body = ''
+    for await (const chunk of req) {
+      body += chunk
+      if (body.length > 4096) break
+    }
+    let text = ''
+    try {
+      text = String(JSON.parse(body || '{}').text ?? '').slice(0, 500)
+    } catch {
+      text = body.slice(0, 500)
+    }
+    lastUse = Date.now()
+    const say = text.trim() ? await askFromPhone(text.trim()).catch(() => 'Something went wrong.') : 'What should I do?'
+    console.log(`[yonna] phone: "${text.slice(0, 60)}" -> ${say.slice(0, 80)}`)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ say }))
+  }
+  // The certificate the iPhone installs once to trust the phone app's https.
+  // A public certificate — nothing secret in it.
+  if (req.method === 'GET' && req.url === '/yonna-ca.crt') {
+    try {
+      const crt = readFileSync(join(homedir(), 'Library/Application Support/Yonna/phone-tls/yonna-ca.crt'))
+      res.writeHead(200, { 'content-type': 'application/x-x509-ca-cert', 'content-disposition': 'attachment; filename="Yonna.crt"' })
+      return res.end(crt)
+    } catch {
+      res.writeHead(404)
+      return res.end()
+    }
+  }
+  // Everything else is for this Mac only.
+  if (!fromThisMac(req)) {
+    res.writeHead(403)
+    return res.end('forbidden')
+  }
   const origin = req.headers.origin
   if (origin && !originAllowed(origin)) {
     console.warn(`[yonna] refused http request from origin ${origin}`)
@@ -879,6 +1111,11 @@ const handleRequest = async (req, res) => {
     return res.end('{"ok":true}')
   }
 
+  if (req.method === 'POST' && req.url === '/debug/call-notice') {
+    toKeys({ type: 'describeCall' })
+    res.writeHead(204)
+    return res.end()
+  }
   // Instant commands: simple things done with no AI. See instant.mjs.
   if (req.method === 'POST' && req.url === '/instant') {
     let body = ''
@@ -892,7 +1129,7 @@ const handleRequest = async (req, res) => {
     } catch {
       /* not JSON: nothing to do */
     }
-    const out = await instant(text).catch((err) => {
+    const out = await instant(text, { askPassword: askKeysPassword }).catch((err) => {
       console.warn(`[yonna] instant failed: ${err?.message ?? err}`)
       return { handled: false }
     })
@@ -1210,6 +1447,11 @@ const wss = new WebSocketServer({
   // the likeliest cause is a dev server on an unexpected port, and a silent
   // 403 would look like the bridge simply isn't running.
   verifyClient: ({ origin, req }, done) => {
+    // Conversations are for this Mac only; the phone uses /phone.
+    if (!fromThisMac(req)) {
+      console.warn(`[yonna] rejected websocket from ${req.socket?.remoteAddress}`)
+      return done(false, 403, 'Forbidden')
+    }
     const path = (req.url ?? '/').split('?')[0]
     if (path !== '/' && path !== '/ws') {
       console.warn(`[yonna] rejected websocket on path ${path}`)
@@ -1226,6 +1468,30 @@ const wss = new WebSocketServer({
   },
 })
 server.listen(PORT)
+// Yonna on the iPhone, as a Home Screen web app over https. See phone.mjs.
+pcKey() // made now, so the PC installer can copy it
+onCallPrompt(() => toKeys({ type: 'pressCall' }))
+// Leaving the house: lights, PC and Mac off after ten minutes away (away.mjs).
+watchAway()
+// For fixing it: POST /debug/call-notice describes the notice on screen.
+startPhone({
+  ask: askFromPhone,
+  transcribe,
+  speak: speakTo,
+  key: phoneKey,
+  // The Windows PC's Left Ctrl helper.
+  pc: {
+    key: pcKey,
+    ask: askFromPc,
+    // Pictures sent with a PC question (its screen, its camera): for the AI, as
+    // the Mac shortcut's screenshot is.
+    vision: (images, note) => {
+      pendingVision = images.length ? { at: Date.now(), images, note: String(note).slice(0, 400) } : null
+    },
+  },
+  // The password typed on the phone, for the PC's sign-in screen.
+  signIn: (password) => openPc(async () => password),
+})
 // Texting Yonna from the user's phone. Does nothing unless configured.
 // YONNA_NO_IMESSAGE=1 for a second, test bridge: two bridges watching the
 // same inbox would both answer every message.
@@ -1367,6 +1633,33 @@ async function onKeys(raw) {
   } catch {
     return
   }
+  if (msg.type === 'log' && typeof msg.text === 'string') {
+    console.log(`[yonna] keys: ${msg.text.slice(0, 200)}`)
+    return
+  }
+  if (msg.type === 'callDescribed') {
+    console.log(`[yonna] call notice:\n${(msg.lines ?? []).join('\n')}`)
+    return
+  }
+  if (msg.type === 'callPressed') {
+    console.log(`[yonna] call prompt: ${msg.ok ? 'pressed Call' : `no Call button found (saw: ${(msg.seen ?? []).join(', ') || 'nothing'})`}`)
+    return
+  }
+  if (msg.type === 'password' && passwords.has(msg.id)) {
+    passwords.get(msg.id)(typeof msg.text === 'string' ? msg.text : null)
+    passwords.delete(msg.id)
+    return
+  }
+  if (msg.type === 'spoken' && speaking.has(msg.id)) {
+    speaking.get(msg.id)(Boolean(msg.ok))
+    speaking.delete(msg.id)
+    return
+  }
+  if (msg.type === 'transcribed' && transcribing.has(msg.id)) {
+    transcribing.get(msg.id)(String(msg.text ?? ''))
+    transcribing.delete(msg.id)
+    return
+  }
   if (msg.type === 'ptt') {
     const out = JSON.stringify({ type: 'ptt', down: Boolean(msg.down) })
     for (const p of pageSockets) if (p.readyState === p.OPEN) p.send(out)
@@ -1505,8 +1798,12 @@ wss.on('connection', (socket, req) => {
   const waiting = new Map()
   let asks = 0
 
+  // Questions from the iPhone or the PC come through the bridge's own
+  // connection, which has no camera or screen to answer with: said at once.
+  const internal = String(req?.url ?? '').includes('internal=1')
   const ask = (kind, args, timeoutMs = 20_000) =>
     new Promise((resolve, reject) => {
+      if (internal) return reject(new Error('there is no camera or screen to use for a question asked from the phone or the PC'))
       if (socket.readyState !== socket.OPEN) {
         return reject(new Error('the interface is not connected'))
       }

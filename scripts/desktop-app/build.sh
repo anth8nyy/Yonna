@@ -155,4 +155,5 @@ fi
 build_helper "Yonna Keys" YonnaKeys local.yonna.keys "$HERE/keys-helper" "
   <key>YonnaRepo</key><string>$REPO</string>
   <key>NSMicrophoneUsageDescription</key><string>Yonna listens while you hold fn.</string>
+  <key>NSCameraUsageDescription</key><string>Yonna shows what the camera sees when you ask her to look at your desk.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Yonna turns what you say while holding fn into text, on this Mac.</string>"

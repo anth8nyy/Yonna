@@ -5,6 +5,9 @@ import { basename, dirname, extname, isAbsolute, join, normalize, resolve } from
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import { playFrom, playOnSpotify, setShuffle, spotifyControl } from './spotify.mjs'
+import { cancelShutdownPc, closeOnPc, openOnPc, openPc, shutdownPc, wakePc } from './pc.mjs'
+import { cancelShutdownMac, shutdownMac } from './macpower.mjs'
+import { lights } from './lights.mjs'
 
 /**
  * Doing things on the Mac that the user asks for in so many words:
@@ -249,6 +252,50 @@ export function macServer() {
               (refused.length ? ` Not moved: ${refused.slice(0, 8).join(', ')}.` : ''),
           )
         },
+      ),
+      tool(
+        'other_pc',
+        'Turn the user\'s other computer (their Windows PC) on, shut it down, or cancel a shutdown. ' +
+          'Shutting down shows a 15-second countdown with a Cancel button on the PC if apps are open; otherwise it shuts down at once. Only when they ask in so many words.',
+        { action: z.enum(['on', 'open', 'shut_down', 'cancel_shutdown']).describe('open = on and all the way to the desktop.') },
+        async ({ action }) =>
+          ok(action === 'on' ? await wakePc() : action === 'open' ? await openPc() : action === 'shut_down' ? await shutdownPc() : await cancelShutdownPc()),
+      ),
+      tool(
+        'lights',
+        'The user\'s smart lights (Xiaomi bulbs at home): on, off, brightness 1–100, or a colour ' +
+          '(red, orange, yellow, green, blue, light blue, cyan, purple, pink, magenta, warm, white, cool, daylight). ' +
+          'name: one light ("desk"), or leave it out for all of them.',
+        {
+          action: z.enum(['on', 'off', 'bright', 'colour']),
+          value: z.union([z.number(), z.string()]).optional().describe('Brightness for bright, a colour name for colour.'),
+          name: z.string().optional(),
+        },
+        async ({ action, value, name }) => ok(await lights(action, value ?? null, name ?? null)),
+      ),
+      tool(
+        'this_mac_power',
+        'Shut this Mac down, or cancel its shutdown. With apps open there is a 15-second countdown with ' +
+          'Cancel on its screen; with none it shuts down at once. Only when they ask in so many words.',
+        { action: z.enum(['shut_down', 'cancel_shutdown']) },
+        async ({ action }) => ok(action === 'shut_down' ? await shutdownMac() : cancelShutdownMac()),
+      ),
+      tool(
+        'open_on_pc',
+        'Open an app or game on the user\'s other computer (their Windows PC), on its screen — "open ' +
+          'Valorant on my PC". Pass just the app\'s name. A website name ("YouTube", "Gmail") opens in Brave there.',
+        { app: z.string().min(1) },
+        async ({ app }) => ok(await openOnPc(app)),
+      ),
+      tool(
+        'close_on_pc',
+        'Close an app or game on the user\'s Windows PC by name, or every open app ("*"). Apps with unsaved ' +
+          'work still get to ask. Use for "close Valorant on my PC", "close everything on my PC".',
+        {
+          app: z.string().min(1).describe('The app\'s name, or * for all.'),
+          except: z.array(z.string()).optional().describe('With *: apps to leave open.'),
+        },
+        async ({ app, except }) => ok(await closeOnPc(app, except ?? [])),
       ),
       tool(
         'open_meeting_window',

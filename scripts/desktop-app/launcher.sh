@@ -113,18 +113,21 @@ for pid in $(/usr/bin/pgrep -f "Yonna.app/Contents/MacOS/launcher"); do
 done
 /usr/bin/pkill -f -- "--user-data-dir=$PROFILE" 2>/dev/null
 /usr/bin/pkill -x YonnaWindow 2>/dev/null
-/usr/bin/pkill -f "bridge/server.mjs" 2>/dev/null
+# The bridge runs on its own when it is a login item (local.yonna.bridge, so
+# the iPhone app can always reach it): leave that one alone.
+ALWAYS_ON=$(/bin/launchctl list 2>/dev/null | grep -c local.yonna.bridge)
+[ "$ALWAYS_ON" = "0" ] && /usr/bin/pkill -f "bridge/server.mjs" 2>/dev/null
 /usr/bin/pkill -f "node_modules/vite/bin/vite.js --port 5173" 2>/dev/null
 for _ in $(seq 1 40); do
   if ! /usr/bin/pgrep -f -- "--user-data-dir=$PROFILE" >/dev/null \
-     && ! /usr/sbin/lsof -nP -iTCP:8787 -sTCP:LISTEN >/dev/null 2>&1 \
+     && { [ "$ALWAYS_ON" != "0" ] || ! /usr/sbin/lsof -nP -iTCP:8787 -sTCP:LISTEN >/dev/null 2>&1; } \
      && ! /usr/sbin/lsof -nP -iTCP:5173 -sTCP:LISTEN >/dev/null 2>&1; then
     break
   fi
   sleep 0.25
 done
 /usr/bin/pkill -9 -f -- "--user-data-dir=$PROFILE" 2>/dev/null
-/usr/bin/pkill -9 -f "bridge/server.mjs" 2>/dev/null
+[ "$ALWAYS_ON" = "0" ] && /usr/bin/pkill -9 -f "bridge/server.mjs" 2>/dev/null
 /usr/bin/pkill -9 -f "node_modules/vite/bin/vite.js --port 5173" 2>/dev/null
 
 started=()
