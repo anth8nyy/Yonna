@@ -18,7 +18,8 @@ if (-not $want) { Done 'error: no app name' }
 function Norm($s) { ($s -replace '\.lnk$', '' -replace '[^\p{L}\p{N}]', '').ToLower() }
 $w = Norm $want
 
-# A website ("open YouTube on my PC"): in Brave, or the default browser.
+# A website ("open YouTube on my PC"): in a Brave window of its own, or the
+# default browser.
 if ($want -match '^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/?=&%#-]*)?$') {
   $brave = @(
     (Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\Application\brave.exe'),
@@ -26,7 +27,58 @@ if ($want -match '^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/?=&%#-]*)?$') {
     (Join-Path ${env:ProgramFiles(x86)} 'BraveSoftware\Brave-Browser\Application\brave.exe')
   ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
   try {
-    if ($brave) { Start-Process -FilePath $brave -ArgumentList $want; Done "site: Brave" }
+    if ($brave) {
+      # In a Brave window of its own, as the mouse shortcut does. Brave closed:
+      # started first so its last windows come back, then those minimised and
+      # the site's window in front.
+      Add-Type @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class YonnaBrave {
+  delegate bool Proc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(Proc fn, IntPtr l);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+  public static List<IntPtr> Windows(HashSet<uint> pids) {
+    var found = new List<IntPtr>();
+    EnumWindows((h, l) => {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      var c = new StringBuilder(64); GetClassName(h, c, 64);
+      if (IsWindowVisible(h) && pids.Contains(pid) && c.ToString() == "Chrome_WidgetWin_1" && GetWindowTextLength(h) > 0) found.Add(h);
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+}
+'@
+      function BraveWindows { $p = New-Object 'System.Collections.Generic.HashSet[uint32]'; Get-Process brave -ErrorAction SilentlyContinue | ForEach-Object { [void]$p.Add([uint32]$_.Id) }; [YonnaBrave]::Windows($p) }
+      $had = @(BraveWindows)
+      $starting = $had.Count -eq 0
+      if ($starting) {
+        Start-Process -FilePath $brave
+        for ($i = 0; $i -lt 25 -and @(BraveWindows).Count -eq 0; $i++) { Start-Sleep -Milliseconds 200 }
+        Start-Sleep -Milliseconds 1200
+        $had = @(BraveWindows)
+      }
+      Start-Process -FilePath $brave -ArgumentList '--new-window', ('"' + $want + '"')
+      $mine = [IntPtr]::Zero
+      for ($i = 0; $i -lt 30 -and $mine -eq [IntPtr]::Zero; $i++) {
+        Start-Sleep -Milliseconds 200
+        $mine = @(BraveWindows) | Where-Object { $had -notcontains $_ } | Select-Object -First 1
+        if (-not $mine) { $mine = [IntPtr]::Zero }
+      }
+      if ($mine -ne [IntPtr]::Zero) { [void][YonnaBrave]::ShowWindow($mine, 3) } # full screen (maximised)
+      if ($starting -and $mine -ne [IntPtr]::Zero) {
+        foreach ($h in $had) { [void][YonnaBrave]::ShowWindow($h, 6) }
+        [YonnaBrave]::keybd_event(0x12, 0, 0, [IntPtr]::Zero); [YonnaBrave]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)
+        [void][YonnaBrave]::SetForegroundWindow($mine)
+      }
+      Done "site: Brave"
+    }
     Start-Process $want; Done "site: browser"
   } catch { Done "error: $($_.Exception.Message)" }
 }

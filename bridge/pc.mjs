@@ -399,7 +399,7 @@ export async function openSiteOnPc(url, label) {
   const pc = pcConfig()
   if (!pc?.ip || !pc?.user) return "Your PC isn't set up yet."
   if (!/^https:\/\/[A-Za-z0-9.-]+(\/[A-Za-z0-9._~\/?=&%#-]*)?$/.test(url)) return "That isn't a website I can open."
-  const reply = await pcTask(pc, 'Yonna Open', 'open', url, 10000)
+  const reply = await pcTask(pc, 'Yonna Open', 'open', url, 20000) // Brave may need starting first
   const where = pc.name || 'your PC'
   if (/^site: /.test(reply)) return `Opening ${label} in ${reply.slice(6).trim()} on ${where}.`
   if (reply === 'nobody') return `Nobody is signed in on ${where}, so there's no screen to open it on.`
